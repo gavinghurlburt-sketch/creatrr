@@ -2306,10 +2306,13 @@ function analyzeTempo(buf) {
   }
   let Lf = bestL;
   const sA = scores[bestL - 1], sB = scores[bestL + 1];
-  if (sA != null && sB != null) { const den = sA - 2 * best + sB; if (den !== 0) Lf = bestL + 0.5 * (sA - sB) / den; }
+  if (sA != null && sB != null) { const den = sA - 2 * best + sB; if (den < 0) Lf = bestL + Math.max(-0.5, Math.min(0.5, 0.5 * (sA - sB) / den)); }
+  if (!(best > 0) || !(Lf > 0)) return null;                       // no usable pulse (silence, drones)
   let bpm = 60 * fps / Lf;
-  while (bpm < 70) bpm *= 2;
-  while (bpm > 180) bpm /= 2;
+  if (!isFinite(bpm) || bpm <= 0) return null;
+  for (let i = 0; i < 8 && bpm < 70; i++) bpm *= 2;                  // bounded: can never spin forever
+  for (let i = 0; i < 8 && bpm > 180; i++) bpm /= 2;
+  if (bpm < 40 || bpm > 250) return null;
   // fine search around the estimate, scoring how well a beat grid lands on onsets
   const envW = new Float32Array(frames);
   for (let f = 1; f < frames - 1; f++) envW[f] = Math.max(env[f - 1], env[f], env[f + 1]);
@@ -3659,18 +3662,81 @@ function cloudMarkDeleted(id) {
   scheduleSync(500);
 }
 function cloudQueueTrack(key, name) {
-  if (!CLOUD || !cloudUser || !project) return;
-  project.cloudTracks = Object.assign({}, project.cloudTracks, { [key]: { name, at: new Date().toISOString() } });
-  scheduleSave();
+  if (!CLOUD || !cloudUser) return;
   const t = readSet(TRACKS_KEY); t.add(key); writeSet(TRACKS_KEY, t);
   scheduleSync(500);
 }
+/* Tracks over the storage limit get a lighter copy for syncing: plain 16-bit PCM (mono if needed).
+   No lossy encoding, so timing stays sample-exact and the click lines up on every device.
+   The original file stays untouched on the device it came from. */
+let SYNC_FILE_LIMIT = 45 * 1024 * 1024;
+function encodeWav16(buf, channels) {
+  const len = buf.length, rate = buf.sampleRate, bytes = len * channels * 2;
+  const out = new DataView(new ArrayBuffer(44 + bytes));
+  const str = (o, t) => { for (let i = 0; i < t.length; i++) out.setUint8(o + i, t.charCodeAt(i)); };
+  str(0, "RIFF"); out.setUint32(4, 36 + bytes, true); str(8, "WAVE"); str(12, "fmt ");
+  out.setUint32(16, 16, true); out.setUint16(20, 1, true); out.setUint16(22, channels, true);
+  out.setUint32(24, rate, true); out.setUint32(28, rate * channels * 2, true); out.setUint16(32, channels * 2, true); out.setUint16(34, 16, true);
+  str(36, "data"); out.setUint32(40, bytes, true);
+  const src = []; for (let c = 0; c < buf.numberOfChannels; c++) src.push(buf.getChannelData(c));
+  let o = 44;
+  for (let i = 0; i < len; i++) {
+    for (let c = 0; c < channels; c++) {
+      let v = channels === 1 && src.length > 1 ? (src[0][i] + src[1][i]) / 2 : src[Math.min(c, src.length - 1)][i];
+      v = Math.max(-1, Math.min(1, v));
+      out.setInt16(o, v < 0 ? v * 0x8000 : v * 0x7fff, true); o += 2;
+    }
+  }
+  return new Blob([out], { type: "audio/wav" });
+}
+async function syncCopyOf(key, blob) {
+  if (blob.size <= SYNC_FILE_LIMIT) return { blob, note: "" };
+  showNotice("That track is big, so a lighter copy is being made for your account. The original stays on this device.");
+  let buf = (typeof trackKey === "function" && project && trackKey() === key && audioBuffer) ? audioBuffer : null;
+  if (!buf) {
+    const Off = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const oc = new Off(2, 1, 44100);
+    const ab = await blob.arrayBuffer();
+    buf = await new Promise((res, rej) => { const p = oc.decodeAudioData(ab, res, rej); if (p && p.then) p.then(res, rej); });
+  }
+  let channels = Math.min(2, buf.numberOfChannels);
+  let copy = encodeWav16(buf, channels);
+  if (copy.size > SYNC_FILE_LIMIT && channels > 1) { channels = 1; copy = encodeWav16(buf, 1); }
+  if (copy.size > SYNC_FILE_LIMIT) return { blob: null, note: "" };
+  return { blob: copy, note: channels === 1 && buf.numberOfChannels > 1 ? "16-bit mono copy" : "16-bit copy" };
+}
+/* Remember songs that can't fit, so they aren't retried forever (a different file gets a fresh try). */
+async function markTrackUnsyncable(key, name, originalBytes) {
+  const pid = key.split("::")[0];
+  const rec = await getProjectRecord(pid);
+  if (!rec) return;
+  rec.cloudTracks = Object.assign({}, rec.cloudTracks, { [key]: { name, uploaded: false, tooBig: originalBytes } });
+  await localPutProject(rec);
+  if (project && project.id === pid) project.cloudTracks = rec.cloudTracks;
+}
+/* Only once the file is really in storage does the shoot say so — then other devices can download it. */
+async function markTrackUploaded(key, name, bytes, note) {
+  const pid = key.split("::")[0];
+  const entry = { name, at: new Date().toISOString(), bytes, uploaded: true, note };
+  const now = new Date().toISOString();
+  const rec = await getProjectRecord(pid);
+  if (!rec) return;
+  rec.cloudTracks = Object.assign({}, rec.cloudTracks, { [key]: entry });
+  rec.updatedAt = now;
+  await localPutProject(rec);
+  if (project && project.id === pid) { project.cloudTracks = rec.cloudTracks; project.updatedAt = now; }
+  const d = readSet(DIRTY_KEY); d.add(pid); writeSet(DIRTY_KEY, d);
+  syncAgain = true;
+}
 async function cloudFetchTrack(key) {
-  if (!CLOUD || !cloudUser || !project || !project.cloudTracks || !project.cloudTracks[key] || !navigator.onLine) return null;
-  showNotice("Downloading the track from your account…");
+  if (!CLOUD || !cloudUser || !project || !project.cloudTracks || !project.cloudTracks[key]) return null;
+  if (project.cloudTracks[key].tooBig) { showNotice("This song was too long to sync, so it only lives on the device it was added from."); return null; }
+  if (!project.cloudTracks[key].uploaded) { showNotice("This song hasn't finished uploading from your other device yet. Open the app there to finish it."); return null; }
+  if (!navigator.onLine) { showNotice("You're offline — the song will download next time you have signal."); return null; }
+  showNotice("Downloading the song from your account…");
   try {
     const { data, error } = await sb.storage.from("media").download(trackPath(key));
-    if (error || !data) return null;
+    if (error || !data) { showNotice("Couldn't download the song. Check your connection and reopen the shoot."); return null; }
     const name = project.cloudTracks[key].name || "Track";
     await localSaveTrack(key, data, name);
     $("toast").classList.add("hidden");
@@ -3692,7 +3758,7 @@ function scheduleSync(ms) {
   if (syncState !== "syncing") setSyncState(navigator.onLine ? "pending" : "offline");
 }
 function setSyncState(s) { syncState = s; renderAccountButton(); if (!$("accountModal").classList.contains("hidden")) renderAccountBody(); }
-async function syncNow() {
+async function syncNow(pass = 0) {
   if (!CLOUD || !cloudUser) return;
   if (!navigator.onLine) { setSyncState("offline"); return; }
   if (syncing) { syncAgain = true; return; }
@@ -3724,11 +3790,16 @@ async function syncNow() {
     // 3. tracks uploaded on this device
     for (const key of readSet(TRACKS_KEY)) {
       const local = await localLoadTrack(key);
-      if (local && local.blob) {
-        if (local.blob.size > 50 * 1024 * 1024) { showNotice(`"${local.name}" is over 50 MB, so it stays on this device only. An MP3 or M4A version will sync.`); }
+      if (local && local.blob && await getProjectRecord(key.split("::")[0])) {
+        const { blob, note } = await syncCopyOf(key, local.blob);
+        if (!blob) {
+          showNotice(`"${local.name}" is too long to sync even as a lighter copy, so it stays on this device only.`);
+          await markTrackUnsyncable(key, local.name, local.blob.size);
+        }
         else {
-          const { error } = await sb.storage.from("media").upload(trackPath(key), local.blob, { upsert: true, contentType: local.blob.type || "audio/mpeg" });
+          const { error } = await sb.storage.from("media").upload(trackPath(key), blob, { upsert: true, contentType: blob.type || "audio/mpeg" });
           if (error) throw error;
+          await markTrackUploaded(key, local.name, blob.size, note);
         }
       }
       const t = readSet(TRACKS_KEY); t.delete(key); writeSet(TRACKS_KEY, t);
@@ -3778,16 +3849,26 @@ async function syncNow() {
       const keys = rec.type === "content" ? rec.songs.map(sg => `${rec.id}::${sg.id}`) : [rec.id];
       for (const key of keys) {
         const t = await localLoadTrack(key);
-        if (t && t.blob) {
-          p.cloudTracks = Object.assign({}, p.cloudTracks, { [key]: { name: t.name, at: new Date().toISOString() } });
-          const q = readSet(TRACKS_KEY); q.add(key); writeSet(TRACKS_KEY, q);
-        }
+        if (t && t.blob) { const q = readSet(TRACKS_KEY); q.add(key); writeSet(TRACKS_KEY, q); }
       }
-      if (p.cloudTracks) await localPutProject(p);
     }
+    let repaired = false;
+    for (const p of await listProjects()) {
+      if (p.isExample || !remote.has(p.id) && !readSet(DIRTY_KEY).has(p.id)) continue;
+      const rec = normalizeRecord(p);
+      const keys = rec.type === "content" ? rec.songs.map(sg => `${rec.id}::${sg.id}`) : [rec.id];
+      for (const key of keys) {
+        const entry = rec.cloudTracks && rec.cloudTracks[key];
+        if ((entry && entry.uploaded) || readSet(TRACKS_KEY).has(key)) continue;
+        const t = await localLoadTrack(key);
+        if (t && t.blob && !(entry && entry.tooBig === t.blob.size)) { const q = readSet(TRACKS_KEY); q.add(key); writeSet(TRACKS_KEY, q); repaired = true; }
+      }
+    }
+    if (repaired) queued = true;
     lastSyncAt = new Date();
     syncing = false;
-    if (queued || syncAgain) { syncAgain = false; return syncNow(); }
+    if ((queued || syncAgain) && pass < 3) { syncAgain = false; return syncNow(pass + 1); }   // capped: never loops forever
+    syncAgain = false;
     setSyncState(pendingCount() ? "pending" : "synced");
     if (changedAny && !project) renderProjectsList();
   } catch (e) {
