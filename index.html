@@ -685,6 +685,17 @@ table.sched tr.done-row td { background-color: var(--done); }
 .acct-section { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; }
 .acct-section h4 { margin: 0 0 6px; font-size: 13px; }
 .gate { text-align: center; padding: 34px 20px; }
+.plan-banner { display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; padding: 9px 14px; font-size: 13px; font-weight: 600; background-color: var(--neutral-bg); color: var(--text); }
+.plan-banner.urgent { background-color: var(--bad-bg); color: var(--bad); }
+.meter { height: 8px; border-radius: 999px; background-color: var(--surface-3); overflow: hidden; margin: 6px 0 4px; }
+.meter span { display: block; height: 100%; background-color: var(--accent); }
+.meter.full span { background-color: var(--danger); }
+.plan-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.plan-card { border: 1px solid var(--border-strong); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 6px; background-color: var(--surface); }
+.plan-card.current { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.plan-card .price { font-size: 22px; font-weight: 800; }
+.plan-card .price small { font-size: 12px; font-weight: 500; color: var(--muted); }
+.plan-card p { margin: 0; font-size: 12px; color: var(--muted); flex: 1; }
 .gate h2 { margin: 0 0 6px; font-size: 20px; }
 .gate p { margin: 0 auto 16px; max-width: 46ch; }
 .cloud-banner { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; justify-content: space-between; margin-top: 14px; }
@@ -757,6 +768,7 @@ table.sched tr.done-row td { background-color: var(--done); }
   </nav>
 </header>
 
+<div id="planBanner" class="plan-banner hidden" role="status"></div>
 <main>
   <!-- ===== projects ===== -->
   <section id="projectsView">
@@ -1110,6 +1122,15 @@ table.sched tr.done-row td { background-color: var(--done); }
   <div class="modal-inner">
     <div id="accountBody"></div>
     <div class="modal-actions"><span></span><button type="button" id="closeAccountBtn" class="btn">Close</button></div>
+  </div>
+</div>
+<div id="plansModal" class="modal hidden">
+  <div class="modal-inner wide">
+    <h3>Choose a plan</h3>
+    <p class="modal-hint">Cancel or switch any time. Your songs and shoots stay in your account either way.</p>
+    <div id="plansList" class="plan-cards"></div>
+    <p id="plansMsg" class="modal-hint" role="status" style="margin-top:10px"></p>
+    <div class="modal-actions"><span></span><button type="button" id="closePlansBtn" class="btn">Close</button></div>
   </div>
 </div>
 <div id="locModal" class="modal hidden">
@@ -3727,6 +3748,25 @@ async function markTrackUnsyncable(key, name, originalBytes) {
   await localPutProject(rec);
   if (project && project.id === pid) project.cloudTracks = rec.cloudTracks;
 }
+/* Songs the server turned away (storage full, or no plan) wait here until there's room again. */
+async function markTrackBlocked(key, name, reason) {
+  const pid = key.split("::")[0];
+  const rec = await getProjectRecord(pid);
+  if (!rec) return;
+  rec.cloudTracks = Object.assign({}, rec.cloudTracks, { [key]: { name, uploaded: false, blocked: reason } });
+  await localPutProject(rec);
+  if (project && project.id === pid) project.cloudTracks = rec.cloudTracks;
+  updateTrackCloudStatus();
+}
+async function clearBlockedTracks() {
+  let any = false;
+  for (const p of await listProjects()) {
+    let changed = false;
+    for (const [k, e] of Object.entries(p.cloudTracks || {})) if (e && e.blocked) { delete p.cloudTracks[k]; changed = true; }
+    if (changed) { await localPutProject(p); any = true; if (project && project.id === p.id) project.cloudTracks = p.cloudTracks; }
+  }
+  if (any) scheduleSync(300);
+}
 /* Only once the file is really in storage does the shoot say so — then other devices can download it. */
 async function markTrackUploaded(key, name, bytes, note) {
   const pid = key.split("::")[0];
@@ -3760,6 +3800,7 @@ async function cloudFetchTrack(key) {
 }
 function cloudRemoveTrack(key) {
   if (!CLOUD || !cloudUser) return;
+  setTimeout(clearBlockedTracks, 1500);   // space freed — songs that were waiting for room get another try
   if (project && project.cloudTracks && project.cloudTracks[key]) { delete project.cloudTracks[key]; scheduleSave(); }
   const t = readSet(TRACKS_KEY); t.delete(key); writeSet(TRACKS_KEY, t);
   if (navigator.onLine) sb.storage.from("media").remove([trackPath(key)]).catch(() => {});
@@ -3812,7 +3853,19 @@ async function syncNow(pass = 0) {
           await markTrackUnsyncable(key, local.name, local.blob.size);
         }
         else {
-          const { error } = await sb.storage.from("media").upload(trackPath(key), blob, { upsert: true, contentType: blob.type || "audio/mpeg" });
+          let grant;
+          try { grant = await billing({ action: "upload-url", path: trackPath(key), bytes: blob.size }); }
+          catch (e) {
+            if (e.code === "quota" || e.code === "no_plan") {
+              await markTrackBlocked(key, local.name, e.code);
+              showNotice(e.message);
+              refreshAccount();
+              const t = readSet(TRACKS_KEY); t.delete(key); writeSet(TRACKS_KEY, t);
+              continue;
+            }
+            throw e;
+          }
+          const { error } = await sb.storage.from("media").uploadToSignedUrl(grant.path, grant.token, blob, { contentType: blob.type || "audio/mpeg" });
           if (error) throw error;
           await markTrackUploaded(key, local.name, blob.size, note);
         }
@@ -3884,7 +3937,7 @@ async function syncNow(pass = 0) {
       const keys = rec.type === "content" ? rec.songs.map(sg => `${rec.id}::${sg.id}`) : [rec.id];
       for (const key of keys) {
         const entry = rec.cloudTracks && rec.cloudTracks[key];
-        if ((entry && entry.uploaded) || readSet(TRACKS_KEY).has(key)) continue;
+        if ((entry && (entry.uploaded || entry.blocked)) || readSet(TRACKS_KEY).has(key)) continue;
         const t = await localLoadTrack(key);
         if (t && t.blob && !(entry && entry.tooBig === t.blob.size)) { const q = readSet(TRACKS_KEY); q.add(key); writeSet(TRACKS_KEY, q); repaired = true; }
       }
@@ -3905,6 +3958,96 @@ async function syncNow(pass = 0) {
     clearTimeout(syncTimer);
     syncTimer = setTimeout(syncNow, 30000);
   }
+}
+
+/* ---- plans & billing ---- */
+let acct = null;   // { plan, subscription_status, trial_ends_at, current_period_end, storage_limit_bytes, used, entitled, plans, has_billing }
+async function billing(body) {
+  const { data, error } = await sb.functions.invoke("billing", { body });
+  if (error) {
+    let info = null;
+    try { info = await error.context.json(); } catch (e) {}
+    const err = new Error((info && info.error) || "Billing isn't reachable right now. Try again in a moment.");
+    err.code = info && info.code;
+    throw err;
+  }
+  return data;
+}
+async function refreshAccount() {
+  if (!cloudUser) return null;
+  const prev = acct;
+  try { acct = await billing({ action: "status" }); } catch (e) { return acct; }
+  if (acct.entitled && (!prev || !prev.entitled || acct.storage_limit_bytes > prev.storage_limit_bytes)) clearBlockedTracks();
+  renderPlanBanner();
+  if (!$("accountModal").classList.contains("hidden")) renderAccountBody();
+  return acct;
+}
+const fmtBytes = b => b >= 1073741824 ? `${(b / 1073741824).toFixed(b >= 10737418240 ? 0 : 1)} GB` : `${Math.max(0, Math.round(b / 1048576))} MB`;
+const daysLeft = iso => Math.max(0, Math.ceil((new Date(iso) - Date.now()) / 86400000));
+function planName(id) { const p = acct && acct.plans && acct.plans.find(x => x.id === id); return p ? p.name : id; }
+function isSubscribed() { return !!acct && ["active", "trialing", "past_due"].includes(acct.subscription_status || ""); }
+function planSummary() {
+  if (!acct) return "";
+  if (acct.subscription_status === "past_due") return `${planName(acct.plan)} — the last payment didn't go through. Update your card to keep your plan.`;
+  if (isSubscribed()) return `${planName(acct.plan)}${acct.current_period_end ? ` · renews ${new Date(acct.current_period_end).toLocaleDateString(undefined, { month: "short", day: "numeric" })}` : ""}`;
+  if (acct.entitled && acct.trial_ends_at) { const d = daysLeft(acct.trial_ends_at); return `Free trial · ${d} day${d === 1 ? "" : "s"} left`; }
+  return "Your free trial has ended";
+}
+function renderPlanBanner() {
+  const b = $("planBanner");
+  if (!CLOUD || !cloudUser || !acct) { b.classList.add("hidden"); return; }
+  let text = "", urgent = false, action = "choose";
+  const trialDays = acct.trial_ends_at ? daysLeft(acct.trial_ends_at) : 0;
+  if (acct.subscription_status === "past_due") { text = "Your last payment didn't go through."; urgent = true; action = "manage"; }
+  else if (!acct.entitled) { text = "Your free trial has ended. Your shoots are safe — choose a plan to keep adding songs."; urgent = true; }
+  else if (!isSubscribed() && trialDays <= 3) text = `Your free trial ends in ${trialDays} day${trialDays === 1 ? "" : "s"}.`;
+  else if (acct.used > acct.storage_limit_bytes * 0.9) { text = `Storage almost full: ${fmtBytes(acct.used)} of ${fmtBytes(acct.storage_limit_bytes)}.`; action = isSubscribed() ? "manage" : "choose"; }
+  if (!text) { b.classList.add("hidden"); return; }
+  b.className = "plan-banner" + (urgent ? " urgent" : "");
+  b.innerHTML = `<span>${esc(text)}</span><button type="button" class="btn small ${urgent ? "primary" : ""}" data-billing="${action}">${action === "manage" ? "Manage plan" : "Choose a plan"}</button>`;
+}
+function openPlans() {
+  if (!acct) { showNotice("Loading your plan… try again in a second."); refreshAccount(); return; }
+  $("plansList").innerHTML = (acct.plans || []).map(p => `<div class="plan-card ${isSubscribed() && acct.plan === p.id ? "current" : ""}">
+      <strong>${esc(p.name)}</strong>
+      <div class="price">$${(p.amount / 100).toFixed(0)}<small> /month</small></div>
+      <p>${esc(p.blurb)}</p>
+      <button type="button" class="btn ${isSubscribed() && acct.plan === p.id ? "" : "primary"}" data-choose-plan="${p.id}" ${isSubscribed() && acct.plan === p.id ? "disabled" : ""}>${isSubscribed() && acct.plan === p.id ? "Current plan" : isSubscribed() ? "Switch" : "Choose"}</button>
+    </div>`).join("");
+  $("plansMsg").textContent = acct.entitled && !isSubscribed() && acct.trial_ends_at ? `You're on the free trial (${daysLeft(acct.trial_ends_at)} days left). Choosing a plan now starts billing today.` : "";
+  $("accountModal").classList.add("hidden");
+  $("plansModal").classList.remove("hidden");
+}
+const appReturnUrl = () => location.origin + location.pathname;
+async function goToCheckout(plan, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "Opening checkout…"; }
+  try { const r = await billing({ action: "checkout", plan, returnUrl: appReturnUrl() }); location.href = r.url; }
+  catch (e) { $("plansMsg").textContent = e.message; if (btn) { btn.disabled = false; btn.textContent = "Choose"; } }
+}
+async function goToPortal() {
+  try { const r = await billing({ action: "portal", returnUrl: appReturnUrl() }); location.href = r.url; }
+  catch (e) { showNotice(e.message); }
+}
+document.addEventListener("click", e => {
+  const b = e.target.closest("[data-billing]");
+  if (b) { if (b.dataset.billing === "manage") goToPortal(); else openPlans(); return; }
+  const c = e.target.closest("[data-choose-plan]");
+  if (c) goToCheckout(c.dataset.choosePlan, c);
+});
+$("closePlansBtn").addEventListener("click", () => $("plansModal").classList.add("hidden"));
+$("plansModal").addEventListener("click", e => { if (e.target.id === "plansModal") $("plansModal").classList.add("hidden"); });
+async function handleCheckoutReturn() {
+  const q = new URLSearchParams(location.search), result = q.get("checkout");
+  if (!result) return;
+  history.replaceState(null, "", appReturnUrl());
+  if (result === "cancel") { showNotice("Checkout cancelled — nothing was charged."); return; }
+  showNotice("Thanks! Activating your plan…");
+  for (let i = 0; i < 8; i++) {
+    await refreshAccount();
+    if (isSubscribed()) { showNotice(`You're on ${planName(acct.plan)}. Thanks for supporting ${APP_NAME}!`); return; }
+    await wait(2000);
+  }
+  showNotice("Payment received. Your plan will show up in a moment — reopen the account panel to check.");
 }
 
 /* ---- sign-in gate: the cloud app starts at the account ---- */
@@ -3932,6 +4075,8 @@ async function updateTrackCloudStatus() {
     const cached = !!(await localLoadTrack(key));
     text = `✓ In your account${entry.note ? ` (synced as a ${entry.note})` : ""} · ${cached ? "downloaded to this device" : "streaming, not kept on this device"}`;
   } else if (entry && entry.tooBig) { text = "Too long to sync, so it's only on this device."; warn = true; }
+  else if (entry && entry.blocked === "quota") { text = "Not uploaded — your storage is full. Upgrade your plan or remove some songs."; warn = true; }
+  else if (entry && entry.blocked === "no_plan") { text = "Not uploaded — your free trial has ended. Choose a plan to keep adding songs."; warn = true; }
   else { text = "Not in your account yet — it will upload on the next sync."; warn = true; }
   if (trackKey() !== key) return;
   el.textContent = text;
@@ -4007,10 +4152,18 @@ function renderAccountBody() {
   const pending = pendingCount();
   const when = lastSyncAt ? relativeTime(lastSyncAt.toISOString()) : "not yet";
   body.innerHTML = `<h3>Signed in</h3>
-    <p class="modal-hint">${esc(cloudUser.email)}${cloudPlan ? ` · ${esc(cloudPlan === "beta" ? "Beta (free)" : cloudPlan)}` : ""}</p>
+    <p class="modal-hint">${esc(cloudUser.email)}</p>
     <p style="margin:0 0 4px"><strong>${esc(SYNC_LABEL[syncState] || "")}</strong></p>
     <p class="modal-hint">Last synced ${when}.${pending ? ` ${pending} change${pending === 1 ? "" : "s"} waiting to upload.` : " Everything on this device is backed up."}</p>
     <div class="acct-actions"><button type="button" class="btn primary" data-acct="sync">Sync now</button></div>
+    <div class="acct-section">
+      <h4>Plan</h4>
+      ${acct ? `<p style="margin:0 0 2px">${esc(planSummary())}</p>
+        <div class="meter ${acct.used >= acct.storage_limit_bytes ? "full" : ""}"><span style="width:${Math.min(100, (acct.used / acct.storage_limit_bytes) * 100).toFixed(1)}%"></span></div>
+        <p class="modal-hint">${fmtBytes(acct.used)} of ${fmtBytes(acct.storage_limit_bytes)} used in your account</p>
+        <div class="acct-actions">${acct.has_billing && (isSubscribed() || acct.subscription_status) ? `<button type="button" class="btn" data-billing="manage">Manage plan &amp; billing</button>` : ""}<button type="button" class="btn ${isSubscribed() ? "" : "primary"}" data-billing="choose">${isSubscribed() ? "Compare plans" : "Choose a plan"}</button></div>`
+      : `<p class="modal-hint">Loading your plan…</p>`}
+    </div>
     <div class="acct-section">
       <h4>Songs on this device</h4>
       <select id="songCacheSelect" class="field" aria-label="Keep songs on this device">
@@ -4026,7 +4179,7 @@ function renderAccountBody() {
   $("songCacheSelect").value = songCacheMode();
   if (!bgProgress) deviceUsageText().then(t => { const u = $("deviceUsage"); if (u && !bgProgress) u.textContent = t; });
 }
-function openAccount() { renderAccountBody(); $("accountModal").classList.remove("hidden"); const e = $("acctEmail"); if (e) e.focus(); }
+function openAccount() { renderAccountBody(); $("accountModal").classList.remove("hidden"); const e = $("acctEmail"); if (e) e.focus(); if (cloudUser) refreshAccount(); }
 function acctMsg(t) { const m = $("acctMsg"); if (m) m.textContent = t; }
 async function onSignedIn(user) {
   const first = !cloudUser;
@@ -4035,8 +4188,7 @@ async function onSignedIn(user) {
   renderAccountButton();
   if (!project) renderProjectsList();
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}   // ask the browser not to clear the app's storage
-  try { const { data } = await sb.from("profiles").select("plan").eq("id", user.id).maybeSingle(); cloudPlan = (data && data.plan) || ""; } catch (e) {}
-  if (first) syncNow();
+  if (first) { syncNow(); refreshAccount().then(handleCheckoutReturn); }
 }
 async function signOutHere() {
   const pending = pendingCount();
@@ -4047,7 +4199,7 @@ async function signOutHere() {
   for (const p of locals) await localDeleteProject(p.id);
   [DIRTY_KEY, DELETES_KEY, TRACKS_KEY].forEach(k => { try { localStorage.removeItem(k); } catch (e) {} });
   await sb.auth.signOut();
-  cloudUser = null; cloudPlan = ""; lastSyncAt = null; gateLoading = false;
+  cloudUser = null; cloudPlan = ""; lastSyncAt = null; gateLoading = false; acct = null; renderPlanBanner();
   setSyncState("off");
   $("accountModal").classList.add("hidden");
   renderProjectsList();
@@ -4129,6 +4281,7 @@ if (CLOUD) {
   window.addEventListener("offline", () => { if (cloudUser) setSyncState("offline"); });
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && cloudUser) scheduleSync(300); });
   setInterval(() => { if (cloudUser && document.visibilityState === "visible") syncNow(); }, 60000);
+  setInterval(() => { if (cloudUser && document.visibilityState === "visible") refreshAccount(); }, 600000);
 }
 
 /* ================= first run ================= */
