@@ -680,6 +680,13 @@ table.sched tr.done-row td { background-color: var(--done); }
 .type-choice:hover { border-color: var(--accent); }
 @media (max-width: 640px) { .type-choices { grid-template-columns: 1fr; } .part-title { font-size: 19px; } }
 
+.track-cloud-status { margin-top: 6px; }
+.track-cloud-status.warn { color: var(--cut); }
+.acct-section { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; }
+.acct-section h4 { margin: 0 0 6px; font-size: 13px; }
+.gate { text-align: center; padding: 34px 20px; }
+.gate h2 { margin: 0 0 6px; font-size: 20px; }
+.gate p { margin: 0 auto 16px; max-width: 46ch; }
 .cloud-banner { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; justify-content: space-between; margin-top: 14px; }
 .acct-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 8px; }
 #accountBody .field { width: 100%; }
@@ -762,10 +769,7 @@ table.sched tr.done-row td { background-color: var(--done); }
       </div>
       <input type="file" id="importProjectInput" accept=".json,application/json" hidden>
       <div id="projectsStatus" class="muted small" style="margin-top:8px"></div>
-      <div id="cloudBanner" class="panel cloud-banner hidden">
-        <div><strong>Back up your shoots and open them anywhere.</strong><div class="muted small">Sign in to sync between your phone and laptop. Free during the beta.</div></div>
-        <button type="button" class="btn primary" data-open-account>Sign in or create account</button>
-      </div>
+
       <div id="projectsList" class="projects-list"></div>
     </div>
   </section>
@@ -787,6 +791,7 @@ table.sched tr.done-row td { background-color: var(--done); }
           <span class="spacer"></span>
           <button id="removeTrackBtn" class="btn small danger-text hidden">Remove track</button>
         </div>
+        <div id="trackCloudStatus" class="muted small track-cloud-status"></div>
         <canvas id="waveformCanvas" class="waveform hidden" aria-label="Waveform — click to seek"></canvas>
         <div class="tempo-row">
           <label>BPM <input type="number" id="bpmInput" class="field num" min="30" max="300" step="0.1" placeholder="—"></label>
@@ -1421,7 +1426,7 @@ let focusedRowId = null;
 let saveTimer = null;
 let unsavedChanges = false;   // only real edits get written (and synced) — just viewing a shoot never does
 
-function setSaveStatus(t) { $("saveStatus").textContent = t; }
+function setSaveStatus(t) { $("saveStatus").textContent = CLOUD ? "" : t; }   // in the cloud app, the account button shows save state
 function scheduleSave() {
   if (!project) return;
   unsavedChanges = true;
@@ -2219,6 +2224,7 @@ function resetPlayer() {
   $("shootWave").classList.add("hidden");
   $("detectTempoBtn").disabled = true;
   updateTransportUI();
+  updateTrackCloudStatus();
 }
 function loadTrackIntoPlayer(blob, name, restored) {
   resetPlayer();
@@ -2230,6 +2236,7 @@ function loadTrackIntoPlayer(blob, name, restored) {
   $("waveformCanvas").classList.remove("hidden");
   $("shootWave").classList.remove("hidden");
   updateTransportUI();
+  updateTrackCloudStatus();
   decodeTrack(blob, !restored && !curTempo().detected);
 }
 async function decodeTrack(blob, autoDetect) {
@@ -2763,6 +2770,7 @@ $("importBackupInput").addEventListener("change", async e => {
 function countShots(p) { return (p.sections || []).reduce((n, s) => n + (s.rows || []).length, 0); }
 async function renderProjectsList() {
   const list = $("projectsList");
+  if (CLOUD && renderAccountGate()) return;
   let projects = [];
   try { projects = await listProjects(); }
   catch (e) { list.innerHTML = ""; $("projectsStatus").textContent = `This browser is blocking the storage ${APP_NAME} needs. Private browsing modes often do this.`; return; }
@@ -2984,6 +2992,7 @@ function renderDraftContent() {
   if (document.activeElement !== $("songNotes")) $("songNotes").value = sg.notes;
   syncTempoInputs();
   renderPartsList();
+  updateTrackCloudStatus();
   renderSongRefs();
   renderSongLinks();
   requestAnimationFrame(drawWaveform);
@@ -3647,6 +3656,9 @@ function cloudSessionStored() {
   if (!CLOUD) return false;
   try { return Object.keys(localStorage).some(k => /^sb-.*-auth-token$/.test(k)); } catch (e) { return false; }
 }
+const SONG_CACHE_KEY = `${APP_KEY}_song_cache`;
+function songCacheMode() { try { return localStorage.getItem(SONG_CACHE_KEY) || "auto"; } catch (e) { return "auto"; } }
+function setSongCacheMode(m) { try { localStorage.setItem(SONG_CACHE_KEY, m); } catch (e) {} }
 function trackPath(key) { const [pid, sid] = key.split("::"); return `${cloudUser.id}/${pid}/${sid || "track"}`; }
 
 /* ---- hooks called by the storage layer ---- */
@@ -3664,6 +3676,7 @@ function cloudMarkDeleted(id) {
 function cloudQueueTrack(key, name) {
   if (!CLOUD || !cloudUser) return;
   const t = readSet(TRACKS_KEY); t.add(key); writeSet(TRACKS_KEY, t);
+  updateTrackCloudStatus();
   scheduleSync(500);
 }
 /* Tracks over the storage limit get a lighter copy for syncing: plain 16-bit PCM (mono if needed).
@@ -3727,6 +3740,8 @@ async function markTrackUploaded(key, name, bytes, note) {
   if (project && project.id === pid) { project.cloudTracks = rec.cloudTracks; project.updatedAt = now; }
   const d = readSet(DIRTY_KEY); d.add(pid); writeSet(DIRTY_KEY, d);
   syncAgain = true;
+  if (songCacheMode() === "off") await localClearTrack(key);   // it's safely in the account now
+  updateTrackCloudStatus();
 }
 async function cloudFetchTrack(key) {
   if (!CLOUD || !cloudUser || !project || !project.cloudTracks || !project.cloudTracks[key]) return null;
@@ -3738,7 +3753,7 @@ async function cloudFetchTrack(key) {
     const { data, error } = await sb.storage.from("media").download(trackPath(key));
     if (error || !data) { showNotice("Couldn't download the song. Check your connection and reopen the shoot."); return null; }
     const name = project.cloudTracks[key].name || "Track";
-    await localSaveTrack(key, data, name);
+    if (songCacheMode() !== "off") await localSaveTrack(key, data, name);
     $("toast").classList.add("hidden");
     return { blob: data, name };
   } catch (e) { return null; }
@@ -3852,6 +3867,16 @@ async function syncNow(pass = 0) {
         if (t && t.blob) { const q = readSet(TRACKS_KEY); q.add(key); writeSet(TRACKS_KEY, q); }
       }
     }
+    if (!rows.length) {
+      const flag = `${APP_KEY}_starter_${uidNow}`;
+      let given = null; try { given = localStorage.getItem(flag); } catch (e) {}
+      if (!given && !(await listProjects()).length) {
+        const ex = exampleContentRecord(); ex.isExample = false;
+        await localPutProject(ex);
+        const d = readSet(DIRTY_KEY); d.add(ex.id); writeSet(DIRTY_KEY, d); queued = true; changedAny = true;
+        try { localStorage.setItem(flag, "1"); } catch (e) {}
+      }
+    }
     let repaired = false;
     for (const p of await listProjects()) {
       if (p.isExample || !remote.has(p.id) && !readSet(DIRTY_KEY).has(p.id)) continue;
@@ -3870,7 +3895,9 @@ async function syncNow(pass = 0) {
     if ((queued || syncAgain) && pass < 3) { syncAgain = false; return syncNow(pass + 1); }   // capped: never loops forever
     syncAgain = false;
     setSyncState(pendingCount() ? "pending" : "synced");
-    if (changedAny && !project) renderProjectsList();
+    if (!project) renderProjectsList();
+    updateTrackCloudStatus();
+    setTimeout(downloadSongsInBackground, 500);
   } catch (e) {
     console.error("Sync failed:", e);
     syncing = false;
@@ -3880,15 +3907,81 @@ async function syncNow(pass = 0) {
   }
 }
 
+/* ---- sign-in gate: the cloud app starts at the account ---- */
+let gateLoading = true;
+function renderAccountGate() {
+  const newRow = document.querySelector("#projectsView .row-flex");
+  if (cloudUser) { newRow.classList.remove("hidden"); return false; }
+  newRow.classList.add("hidden");
+  $("projectsList").innerHTML = gateLoading && cloudSessionStored()
+    ? `<div class="gate muted">Loading your shoots…</div>`
+    : `<div class="panel gate"><h2>Sign in to ${APP_NAME}</h2><p class="muted">Your shoots and songs live in your account, so they're on your phone and your laptop, and nothing is lost if a device is.</p><button type="button" class="btn primary" data-open-account>Sign in or create an account</button></div>`;
+  return true;
+}
+
+/* ---- per-song status in Draft ---- */
+async function updateTrackCloudStatus() {
+  const el = $("trackCloudStatus");
+  if (!el) return;
+  if (!CLOUD || !cloudUser || !project || !player.src) { el.textContent = ""; el.classList.remove("warn"); return; }
+  const key = trackKey();
+  const entry = project.cloudTracks && project.cloudTracks[key];
+  let text = "", warn = false;
+  if (readSet(TRACKS_KEY).has(key)) { text = navigator.onLine ? "Uploading to your account…" : "Waiting for signal to upload — held on this device until then."; warn = !navigator.onLine; }
+  else if (entry && entry.uploaded) {
+    const cached = !!(await localLoadTrack(key));
+    text = `✓ In your account${entry.note ? ` (synced as a ${entry.note})` : ""} · ${cached ? "downloaded to this device" : "streaming, not kept on this device"}`;
+  } else if (entry && entry.tooBig) { text = "Too long to sync, so it's only on this device."; warn = true; }
+  else { text = "Not in your account yet — it will upload on the next sync."; warn = true; }
+  if (trackKey() !== key) return;
+  el.textContent = text;
+  el.classList.toggle("warn", warn);
+}
+
+/* ---- keep songs on this device (setting) ---- */
+let bgDownloading = false, bgProgress = null;
+async function downloadSongsInBackground() {
+  if (!CLOUD || !cloudUser || bgDownloading || songCacheMode() !== "auto" || !navigator.onLine) return;
+  bgDownloading = true;
+  try {
+    const todo = [];
+    for (const p of await listProjects()) {
+      for (const [key, entry] of Object.entries(p.cloudTracks || {})) {
+        if (entry && entry.uploaded && !(await localLoadTrack(key))) todo.push({ key, name: entry.name || "Track" });
+      }
+    }
+    bgProgress = todo.length ? { done: 0, total: todo.length } : null;
+    for (const t of todo) {
+      if (!cloudUser || songCacheMode() !== "auto" || !navigator.onLine) break;
+      const { data, error } = await sb.storage.from("media").download(trackPath(t.key));
+      if (!error && data) await localSaveTrack(t.key, data, t.name);
+      bgProgress.done++;
+      if (!$("accountModal").classList.contains("hidden")) renderAccountBody();
+    }
+  } catch (e) { console.error("Background download stopped:", e); }
+  bgDownloading = false; bgProgress = null;
+  if (!$("accountModal").classList.contains("hidden")) renderAccountBody();
+  updateTrackCloudStatus();
+}
+async function removeDownloadedSongs() {
+  const pending = readSet(TRACKS_KEY);
+  const keys = await idb("tracks", "readonly", tx => tx.objectStore("tracks").getAllKeys());
+  let n = 0;
+  for (const k of keys || []) if (!pending.has(k)) { await localClearTrack(k); n++; }
+  return n;
+}
+async function deviceUsageText() {
+  try { const e = await navigator.storage.estimate(); return `${(e.usage / 1048576).toFixed(0)} MB used on this device`; } catch (e) { return ""; }
+}
+
 /* ---- account UI ---- */
-const SYNC_LABEL = { off: "Sign in", synced: "Synced", syncing: "Syncing…", pending: "Saving to account…", offline: "Offline — saved here", error: "Sync issue" };
+const SYNC_LABEL = { off: "Sign in", synced: "Synced", syncing: "Syncing…", pending: "Saving to account…", offline: "Offline — will upload", error: "Sync issue" };
 function renderAccountButton() {
   if (!CLOUD) return;
   const b = $("accountBtn");
   b.classList.remove("hidden", "ok", "warn");
   if (!cloudUser) { b.textContent = "Sign in"; }
   else { b.textContent = SYNC_LABEL[syncState] || "Account"; if (syncState === "synced") b.classList.add("ok"); if (syncState === "error" || syncState === "offline") b.classList.add("warn"); }
-  $("cloudBanner").classList.toggle("hidden", !!cloudUser);
 }
 function friendlyAuthError(e) {
   const m = (e && e.message) || String(e);
@@ -3917,15 +4010,31 @@ function renderAccountBody() {
     <p class="modal-hint">${esc(cloudUser.email)}${cloudPlan ? ` · ${esc(cloudPlan === "beta" ? "Beta (free)" : cloudPlan)}` : ""}</p>
     <p style="margin:0 0 4px"><strong>${esc(SYNC_LABEL[syncState] || "")}</strong></p>
     <p class="modal-hint">Last synced ${when}.${pending ? ` ${pending} change${pending === 1 ? "" : "s"} waiting to upload.` : " Everything on this device is backed up."}</p>
-    <div class="acct-actions"><button type="button" class="btn primary" data-acct="sync">Sync now</button><button type="button" class="btn danger-text" data-acct="signout">Sign out of this device</button></div>
+    <div class="acct-actions"><button type="button" class="btn primary" data-acct="sync">Sync now</button></div>
+    <div class="acct-section">
+      <h4>Songs on this device</h4>
+      <select id="songCacheSelect" class="field" aria-label="Keep songs on this device">
+        <option value="auto">Download all my songs (works offline)</option>
+        <option value="opened">Keep only songs I open</option>
+        <option value="off">Stream only, don't keep songs here</option>
+      </select>
+      <p class="modal-hint" id="deviceUsage" style="margin-top:6px">${bgProgress ? `Downloading songs: ${bgProgress.done} of ${bgProgress.total}…` : ""}</p>
+      <div class="acct-actions"><button type="button" class="btn" data-acct="dlall">Download all now</button><button type="button" class="btn" data-acct="rmsongs">Remove downloaded songs</button></div>
+    </div>
+    <div class="acct-section"><button type="button" class="btn danger-text" data-acct="signout">Sign out of this device</button></div>
     <p id="acctMsg" class="modal-hint" role="status"></p>`;
+  $("songCacheSelect").value = songCacheMode();
+  if (!bgProgress) deviceUsageText().then(t => { const u = $("deviceUsage"); if (u && !bgProgress) u.textContent = t; });
 }
 function openAccount() { renderAccountBody(); $("accountModal").classList.remove("hidden"); const e = $("acctEmail"); if (e) e.focus(); }
 function acctMsg(t) { const m = $("acctMsg"); if (m) m.textContent = t; }
 async function onSignedIn(user) {
   const first = !cloudUser;
   cloudUser = user;
+  gateLoading = false;
   renderAccountButton();
+  if (!project) renderProjectsList();
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}   // ask the browser not to clear the app's storage
   try { const { data } = await sb.from("profiles").select("plan").eq("id", user.id).maybeSingle(); cloudPlan = (data && data.plan) || ""; } catch (e) {}
   if (first) syncNow();
 }
@@ -3938,7 +4047,7 @@ async function signOutHere() {
   for (const p of locals) await localDeleteProject(p.id);
   [DIRTY_KEY, DELETES_KEY, TRACKS_KEY].forEach(k => { try { localStorage.removeItem(k); } catch (e) {} });
   await sb.auth.signOut();
-  cloudUser = null; cloudPlan = ""; lastSyncAt = null;
+  cloudUser = null; cloudPlan = ""; lastSyncAt = null; gateLoading = false;
   setSyncState("off");
   $("accountModal").classList.add("hidden");
   renderProjectsList();
@@ -3973,10 +4082,23 @@ $("accountBody").addEventListener("click", async e => {
       acctMsg(error ? friendlyAuthError(error) : "If that email has an account, a reset link is on its way.");
     } else if (act === "sync") {
       await syncNow(); renderAccountBody();
+    } else if (act === "dlall") {
+      if (!navigator.onLine) { acctMsg("You're offline — try again with signal."); return; }
+      const prev = songCacheMode(); setSongCacheMode("auto"); await downloadSongsInBackground(); setSongCacheMode(prev);
+      renderAccountBody(); acctMsg("All your songs are on this device.");
+    } else if (act === "rmsongs") {
+      if (!confirm("Remove downloaded songs from this device? They stay in your account and download again when you open them.")) return;
+      const n = await removeDownloadedSongs(); renderAccountBody(); acctMsg(`Removed ${n} song${n === 1 ? "" : "s"} from this device.`); updateTrackCloudStatus();
     } else if (act === "signout") {
       await signOutHere();
     }
   } catch (err) { b.disabled = false; acctMsg(friendlyAuthError(err)); }
+});
+$("accountBody").addEventListener("change", e => {
+  if (e.target.id !== "songCacheSelect") return;
+  setSongCacheMode(e.target.value);
+  acctMsg(e.target.value === "auto" ? "Downloading your songs in the background." : e.target.value === "off" ? "Songs will stream. Use “Remove downloaded songs” to free space now." : "Songs you open stay on this device.");
+  if (e.target.value === "auto") downloadSongsInBackground();
 });
 $("accountBody").addEventListener("keydown", e => {
   if (e.key === "Enter" && (e.target.id === "acctPass" || e.target.id === "acctEmail")) { e.preventDefault(); const b = document.querySelector('[data-acct="signin"]'); if (b) b.click(); }
@@ -4001,8 +4123,9 @@ if (CLOUD) {
     }
     if (session && session.user && (!cloudUser || cloudUser.id !== session.user.id)) setTimeout(() => onSignedIn(session.user), 0);
     if (event === "SIGNED_OUT") { cloudUser = null; renderAccountButton(); }
+    if (event === "INITIAL_SESSION" && !session) { gateLoading = false; if (!project) renderProjectsList(); }
   });
-  window.addEventListener("online", () => scheduleSync(300));
+  window.addEventListener("online", () => { scheduleSync(300); updateTrackCloudStatus(); });
   window.addEventListener("offline", () => { if (cloudUser) setSyncState("offline"); });
   document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && cloudUser) scheduleSync(300); });
   setInterval(() => { if (cloudUser && document.visibilityState === "visible") syncNow(); }, 60000);
@@ -4053,7 +4176,7 @@ async function seedContentExampleOnce() {
 async function firstRunSetup() {
   if (APP_MODE === "content") {
     if (DEMO_MODE) { if (!demoProjects.size) await putProjectRecord(exampleContentRecord()); return; }
-    if (cloudSessionStored()) return;   // signed-in devices get their shoots from the account, not an example
+    if (CLOUD) return;   // cloud app: shoots live in the account; new accounts get the example there
     try { if (!(await listProjects()).length) await seedContentExampleOnce(); } catch (e) {}
     return;
   }
