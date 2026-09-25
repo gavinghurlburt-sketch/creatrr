@@ -1442,9 +1442,16 @@ async function localDeleteProject(id) {
     tx.objectStore("tracks").delete(IDBKeyRange.bound(id, id + "\uffff"));
   });
 }
+/* iPhone Safari can store a picked file as a mere reference that goes dead after the app restarts
+   (it then reads back as 0 bytes). Copying the actual bytes into a fresh Blob stores real audio. */
+async function materializeBlob(blob) {
+  try { const buf = await blob.arrayBuffer(); return new Blob([buf], { type: blob.type || "audio/mpeg" }); }
+  catch (e) { return null; }
+}
 async function localSaveTrack(key, blob, name) {
   if (DEMO_MODE) { demoTracks.set(key, { blob, name }); return; }
-  try { await idb("tracks", "readwrite", tx => { tx.objectStore("tracks").put({ projectId: key, blob, name }); }); }
+  const data = (await materializeBlob(blob)) || blob;
+  try { await idb("tracks", "readwrite", tx => { tx.objectStore("tracks").put({ projectId: key, blob: data, name }); }); }
   catch (e) { console.error("Couldn't save the track:", e); }
 }
 async function localLoadTrack(key) {
@@ -3694,6 +3701,8 @@ const CLOUD = APP_MODE === "content" && !DEMO_MODE && typeof supabase !== "undef
   : null;
 let sb = null, cloudUser = null, cloudPlan = "", syncState = "off", lastSyncAt = null, syncing = false, syncAgain = false, syncTimer = null;
 const DIRTY_KEY = `${APP_KEY}_sync_dirty`, DELETES_KEY = `${APP_KEY}_sync_deletes`, TRACKS_KEY = `${APP_KEY}_sync_tracks`;
+const FRESH_KEY = `${APP_KEY}_sync_fresh`;   // tracks the user just added/replaced on this device (always upload these)
+let lastSyncError = "";
 function readSet(k) { try { return new Set(JSON.parse(localStorage.getItem(k) || "[]")); } catch (e) { return new Set(); } }
 function writeSet(k, set) { try { localStorage.setItem(k, JSON.stringify([...set])); } catch (e) {} }
 function pendingCount() { return readSet(DIRTY_KEY).size + readSet(DELETES_KEY).size + readSet(TRACKS_KEY).size; }
@@ -3721,6 +3730,7 @@ function cloudMarkDeleted(id) {
 function cloudQueueTrack(key, name) {
   if (!CLOUD || !cloudUser) return;
   const t = readSet(TRACKS_KEY); t.add(key); writeSet(TRACKS_KEY, t);
+  const f = readSet(FRESH_KEY); f.add(key); writeSet(FRESH_KEY, f);
   updateTrackCloudStatus();
   scheduleSync(500);
 }
@@ -3771,6 +3781,26 @@ async function markTrackUnsyncable(key, name, originalBytes) {
   rec.cloudTracks = Object.assign({}, rec.cloudTracks, { [key]: { name, uploaded: false, tooBig: originalBytes } });
   await localPutProject(rec);
   if (project && project.id === pid) project.cloudTracks = rec.cloudTracks;
+}
+/* Size of this song's file in the account, or 0 if it isn't there. */
+async function remoteTrackSize(key) {
+  try {
+    const [pid, sid] = key.split("::");
+    const { data } = await sb.storage.from("media").list(`${cloudUser.id}/${pid}`, { search: sid || "track" });
+    const f = (data || []).find(x => x.name === (sid || "track"));
+    return (f && f.metadata && f.metadata.size) || 0;
+  } catch (e) { return 0; }
+}
+/* This device's copy of a song can't be read (iPhone lost the file) — say so instead of retrying forever. */
+async function markTrackUnreadable(key, name) {
+  const pid = key.split("::")[0];
+  const rec = await getProjectRecord(pid);
+  if (!rec) return;
+  rec.cloudTracks = Object.assign({}, rec.cloudTracks, { [key]: { name, uploaded: false, unreadable: true } });
+  await localPutProject(rec);
+  if (project && project.id === pid) project.cloudTracks = rec.cloudTracks;
+  showNotice(`This device lost its copy of "${name}". Re-add the song's file here to upload it.`);
+  updateTrackCloudStatus();
 }
 /* Songs the server turned away (storage full, or no plan) wait here until there's room again. */
 async function markTrackBlocked(key, name, reason) {
@@ -3867,34 +3897,51 @@ async function syncNow(pass = 0) {
       const now = await getProjectRecord(id);
       if (!now || now.updatedAt === rec.updatedAt) { d2.delete(id); writeSet(DIRTY_KEY, d2); }   // edited again mid-upload? keep it queued
     }
-    // 3. tracks uploaded on this device
+    // 3. tracks uploaded on this device — each song is handled on its own, so one bad file can't block the rest
+    let trackErrors = 0;
     for (const key of readSet(TRACKS_KEY)) {
-      const local = await localLoadTrack(key);
-      if (local && local.blob && await getProjectRecord(key.split("::")[0])) {
-        const { blob, note } = await syncCopyOf(key, local.blob);
+      const done = () => {
+        const t = readSet(TRACKS_KEY); t.delete(key); writeSet(TRACKS_KEY, t);
+        const f = readSet(FRESH_KEY); f.delete(key); writeSet(FRESH_KEY, f);
+      };
+      try {
+        const local = await localLoadTrack(key);
+        const rec = await getProjectRecord(key.split("::")[0]);
+        if (!local || !local.blob || !rec) { done(); continue; }
+        // Already in the account (uploaded from another device)? Record it instead of sending it again.
+        if (!readSet(FRESH_KEY).has(key)) {
+          const remoteBytes = await remoteTrackSize(key);
+          if (remoteBytes > 0) { await markTrackUploaded(key, local.name, remoteBytes, ""); done(); continue; }
+        }
+        // Make sure this device can actually read the audio (see materializeBlob).
+        const readable = local.blob.size > 0 ? await materializeBlob(local.blob) : null;
+        if (!readable || readable.size === 0) { await markTrackUnreadable(key, local.name); done(); continue; }
+        const { blob, note } = await syncCopyOf(key, readable);
         if (!blob) {
           showNotice(`"${local.name}" is too long to sync even as a lighter copy, so it stays on this device only.`);
           await markTrackUnsyncable(key, local.name, local.blob.size);
+          done(); continue;
         }
-        else {
-          let grant;
-          try { grant = await billing({ action: "upload-url", path: trackPath(key), bytes: blob.size }); }
-          catch (e) {
-            if (e.code === "quota" || e.code === "no_plan") {
-              await markTrackBlocked(key, local.name, e.code);
-              showNotice(e.message);
-              refreshAccount();
-              const t = readSet(TRACKS_KEY); t.delete(key); writeSet(TRACKS_KEY, t);
-              continue;
-            }
-            throw e;
+        let grant;
+        try { grant = await billing({ action: "upload-url", path: trackPath(key), bytes: blob.size }); }
+        catch (e) {
+          if (e.code === "quota" || e.code === "no_plan") {
+            await markTrackBlocked(key, local.name, e.code);
+            showNotice(e.message);
+            refreshAccount();
+            done(); continue;
           }
-          const { error } = await sb.storage.from("media").uploadToSignedUrl(grant.path, grant.token, blob, { contentType: blob.type || "audio/mpeg" });
-          if (error) throw error;
-          await markTrackUploaded(key, local.name, blob.size, note);
+          throw e;
         }
+        const { error } = await sb.storage.from("media").uploadToSignedUrl(grant.path, grant.token, blob, { contentType: blob.type || "audio/mpeg" });
+        if (error) throw error;
+        await markTrackUploaded(key, local.name, blob.size, note);
+        done();
+      } catch (e) {
+        trackErrors++;
+        lastSyncError = `Couldn't upload a song (${(e && e.message) || e}). It will retry automatically.`;
+        console.error("Track upload failed:", key, e);
       }
-      const t = readSet(TRACKS_KEY); t.delete(key); writeSet(TRACKS_KEY, t);
     }
     // 4. changes from other devices
     const { data: rows, error } = await sb.from("projects").select("id, updated_at, deleted").eq("app", APP_KEY);
@@ -3961,7 +4008,7 @@ async function syncNow(pass = 0) {
       const keys = rec.type === "content" ? rec.songs.map(sg => `${rec.id}::${sg.id}`) : [rec.id];
       for (const key of keys) {
         const entry = rec.cloudTracks && rec.cloudTracks[key];
-        if ((entry && (entry.uploaded || entry.blocked)) || readSet(TRACKS_KEY).has(key)) continue;
+        if ((entry && (entry.uploaded || entry.blocked || entry.unreadable)) || readSet(TRACKS_KEY).has(key)) continue;
         const t = await localLoadTrack(key);
         if (t && t.blob && !(entry && entry.tooBig === t.blob.size)) { const q = readSet(TRACKS_KEY); q.add(key); writeSet(TRACKS_KEY, q); repaired = true; }
       }
@@ -3971,12 +4018,16 @@ async function syncNow(pass = 0) {
     syncing = false;
     if ((queued || syncAgain) && pass < 3) { syncAgain = false; return syncNow(pass + 1); }   // capped: never loops forever
     syncAgain = false;
-    setSyncState(pendingCount() ? "pending" : "synced");
+    if (trackErrors) {
+      setSyncState("error");
+      clearTimeout(syncTimer); syncTimer = setTimeout(syncNow, 60000);
+    } else { lastSyncError = ""; setSyncState(pendingCount() ? "pending" : "synced"); }
     if (!project) renderProjectsList();
     updateTrackCloudStatus();
     setTimeout(downloadSongsInBackground, 500);
   } catch (e) {
     console.error("Sync failed:", e);
+    lastSyncError = (e && e.message) || String(e);
     syncing = false;
     setSyncState(navigator.onLine ? "error" : "offline");
     clearTimeout(syncTimer);
@@ -4177,6 +4228,7 @@ async function updateTrackCloudStatus() {
     const cached = !!(await localLoadTrack(key));
     text = `✓ In your account${entry.note ? ` (synced as a ${entry.note})` : ""} · ${cached ? "downloaded to this device" : "streaming, not kept on this device"}`;
   } else if (entry && entry.tooBig) { text = "Too long to sync, so it's only on this device."; warn = true; }
+  else if (entry && entry.unreadable) { text = "This device lost its copy of this song (an iPhone storage quirk). Upload the track again here, or open the shoot on the device that has the file."; warn = true; }
   else if (entry && entry.blocked === "quota") { text = "Not uploaded — your storage is full. Upgrade your plan or remove some songs."; warn = true; }
   else if (entry && entry.blocked === "no_plan") { text = "Not uploaded — your free trial has ended. Choose a plan to keep adding songs."; warn = true; }
   else { text = "Not in your account yet — it will upload on the next sync."; warn = true; }
@@ -4257,6 +4309,7 @@ function renderAccountBody() {
     <p class="modal-hint">${esc(cloudUser.email)}</p>
     <p style="margin:0 0 4px"><strong>${esc(SYNC_LABEL[syncState] || "")}</strong></p>
     <p class="modal-hint">Last synced ${when}.${pending ? ` ${pending} change${pending === 1 ? "" : "s"} waiting to upload.` : " Everything on this device is backed up."}</p>
+    ${syncState === "error" && lastSyncError ? `<p class="modal-hint" style="color:var(--cut)">Problem: ${esc(lastSyncError)}</p>` : ""}
     <div class="acct-actions"><button type="button" class="btn primary" data-acct="sync">Sync now</button></div>
     <div class="acct-section">
       <h4>Plan</h4>
