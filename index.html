@@ -1,6 +1,14 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+<script>
+  // Already signed in on this browser? Go straight to the app (creatrr.co/?home still shows this page).
+  try {
+    if (!/[?&]home\b/.test(location.search) && Object.keys(localStorage).some(function (k) { return /^sb-.*-auth-token$/.test(k); })) {
+      location.replace("app/");
+    }
+  } catch (e) {}
+</script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Creatrr — shoot more of the song in less time</title>
