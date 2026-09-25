@@ -1,6 +1,6 @@
 // Creatrr — app-shell cache. Your project data lives in IndexedDB, not here;
 // this only makes sure the app itself still opens with no signal.
-const CACHE_NAME = "creatrr-app-v13";
+const CACHE_NAME = "creatrr-app-v14";
 const SHELL_ASSETS = [
   "./",
   "./index.html",

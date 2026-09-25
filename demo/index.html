@@ -684,6 +684,12 @@ table.sched tr.done-row td { background-color: var(--done); }
 .acct-section { border-top: 1px solid var(--border); margin-top: 14px; padding-top: 12px; }
 .acct-section h4 { margin: 0 0 6px; font-size: 13px; }
 .gate { text-align: center; padding: 34px 20px; }
+.admin-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.admin-form #adminEmail, .admin-form #adminNote { grid-column: 1 / -1; }
+.admin-form .btn { grid-column: 1 / -1; justify-content: center; }
+.admin-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; flex-wrap: wrap; }
+.admin-row .who { flex: 1; min-width: 160px; }
+.admin-row .who strong { display: block; }
 .plan-banner { display: flex; align-items: center; justify-content: center; gap: 12px; flex-wrap: wrap; padding: 9px 14px; font-size: 13px; font-weight: 600; background-color: var(--neutral-bg); color: var(--text); }
 .plan-banner.urgent { background-color: var(--bad-bg); color: var(--bad); }
 .meter { height: 8px; border-radius: 999px; background-color: var(--surface-3); overflow: hidden; margin: 6px 0 4px; }
@@ -756,6 +762,7 @@ table.sched tr.done-row td { background-color: var(--done); }
     <input type="text" id="docTitleInput" class="doc-title hidden" placeholder="Untitled project" aria-label="Project title">
     <span class="spacer"></span>
     <span id="saveStatus" class="small"></span>
+    <button id="planBtn" class="btn small hidden" data-billing="choose">Upgrade</button>
     <button id="accountBtn" class="btn small hidden">Sign in</button>
     <button id="themeToggle" class="btn small">Dark mode</button>
   </div>
@@ -1130,6 +1137,23 @@ table.sched tr.done-row td { background-color: var(--done); }
     <div id="plansList" class="plan-cards"></div>
     <p id="plansMsg" class="modal-hint" role="status" style="margin-top:10px"></p>
     <div class="modal-actions"><span></span><button type="button" id="closePlansBtn" class="btn">Close</button></div>
+  </div>
+</div>
+<div id="adminModal" class="modal hidden">
+  <div class="modal-inner wide">
+    <h3>Give free access</h3>
+    <p class="modal-hint">Give friends (or yourself) a plan without paying. If they haven't signed up yet, it applies the moment they create an account with that email.</p>
+    <div class="admin-form">
+      <input type="email" id="adminEmail" class="field" placeholder="their@email.com" autocomplete="off">
+      <select id="adminPlan" class="field" aria-label="Plan"><option value="creatrr">Creatrr (25 GB)</option><option value="creatrr_plus" selected>Creatrr Plus (100 GB)</option><option value="producrr">Producrr (200 GB)</option></select>
+      <select id="adminDays" class="field" aria-label="How long"><option value="30">1 month</option><option value="90">3 months</option><option value="365">1 year</option><option value="">No end date</option></select>
+      <input type="text" id="adminNote" class="field" placeholder="Note (optional), e.g. band member">
+      <button type="button" id="adminGrantBtn" class="btn primary">Give access</button>
+    </div>
+    <p id="adminMsg" class="modal-hint" role="status" style="margin-top:8px"></p>
+    <h4 style="margin:14px 0 6px;font-size:13px">People with free access</h4>
+    <div id="adminList"><p class="modal-hint">Loading…</p></div>
+    <div class="modal-actions"><span></span><button type="button" id="closeAdminBtn" class="btn">Close</button></div>
   </div>
 </div>
 <div id="locModal" class="modal hidden">
@@ -3960,7 +3984,14 @@ async function syncNow(pass = 0) {
 }
 
 /* ---- plans & billing ---- */
-let acct = null;   // { plan, subscription_status, trial_ends_at, current_period_end, storage_limit_bytes, used, entitled, plans, has_billing }
+let acct = null;   // { plan, subscription_status, trial_ends_at, current_period_end, storage_limit_bytes, used, entitled, plans, has_billing, comp, is_admin }
+let billingDown = false;
+const BUILTIN_PLANS = [
+  { id: "creatrr", name: "Creatrr", amount: 900, gb: 25, blurb: "Content shoots, 25 GB for songs and references" },
+  { id: "creatrr_plus", name: "Creatrr Plus", amount: 1900, gb: 100, blurb: "Content shoots, 100 GB for songs and references" },
+  { id: "producrr", name: "Producrr", amount: 2900, gb: 200, blurb: "Everything, 200 GB, plus video production tools" }
+];
+const planList = () => (acct && Array.isArray(acct.plans) && acct.plans.length) ? acct.plans : BUILTIN_PLANS;
 async function billing(body) {
   const { data, error } = await sb.functions.invoke("billing", { body });
   if (error) {
@@ -3975,7 +4006,11 @@ async function billing(body) {
 async function refreshAccount() {
   if (!cloudUser) return null;
   const prev = acct;
-  try { acct = await billing({ action: "status" }); } catch (e) { return acct; }
+  try {
+    const st = await billing({ action: "status" });
+    if (!st || !Array.isArray(st.plans)) throw new Error("Billing replied in an unexpected way");   // e.g. the function is still Supabase's sample code
+    acct = st; billingDown = false;
+  } catch (e) { console.error("Billing status:", e.message); billingDown = true; renderPlanButton(); return acct; }
   if (acct.entitled && (!prev || !prev.entitled || acct.storage_limit_bytes > prev.storage_limit_bytes)) clearBlockedTracks();
   renderPlanBanner();
   if (!$("accountModal").classList.contains("hidden")) renderAccountBody();
@@ -3983,48 +4018,69 @@ async function refreshAccount() {
 }
 const fmtBytes = b => b >= 1073741824 ? `${(b / 1073741824).toFixed(b >= 10737418240 ? 0 : 1)} GB` : `${Math.max(0, Math.round(b / 1048576))} MB`;
 const daysLeft = iso => Math.max(0, Math.ceil((new Date(iso) - Date.now()) / 86400000));
-function planName(id) { const p = acct && acct.plans && acct.plans.find(x => x.id === id); return p ? p.name : id; }
+function planName(id) { const p = planList().find(x => x.id === id); return p ? p.name : id; }
 function isSubscribed() { return !!acct && ["active", "trialing", "past_due"].includes(acct.subscription_status || ""); }
+function hasComp() { return !!(acct && acct.comp); }
+function renderPlanButton() {
+  const b = $("planBtn");
+  if (!CLOUD || !cloudUser) { b.classList.add("hidden"); return; }
+  b.classList.remove("hidden");
+  b.textContent = hasComp() ? planName(acct.comp.plan) : isSubscribed() ? planName(acct.plan) : "Upgrade";
+  b.classList.toggle("primary", !hasComp() && !isSubscribed());
+}
 function planSummary() {
   if (!acct) return "";
   if (acct.subscription_status === "past_due") return `${planName(acct.plan)} — the last payment didn't go through. Update your card to keep your plan.`;
+  if (hasComp() && !isSubscribed()) return `${planName(acct.comp.plan)} · complimentary${acct.comp.until ? ` until ${new Date(acct.comp.until).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}` : ""}`;
   if (isSubscribed()) return `${planName(acct.plan)}${acct.current_period_end ? ` · renews ${new Date(acct.current_period_end).toLocaleDateString(undefined, { month: "short", day: "numeric" })}` : ""}`;
   if (acct.entitled && acct.trial_ends_at) { const d = daysLeft(acct.trial_ends_at); return `Free trial · ${d} day${d === 1 ? "" : "s"} left`; }
   return "Your free trial has ended";
 }
 function renderPlanBanner() {
   const b = $("planBanner");
+  renderPlanButton();
   if (!CLOUD || !cloudUser || !acct) { b.classList.add("hidden"); return; }
   let text = "", urgent = false, action = "choose";
   const trialDays = acct.trial_ends_at ? daysLeft(acct.trial_ends_at) : 0;
   if (acct.subscription_status === "past_due") { text = "Your last payment didn't go through."; urgent = true; action = "manage"; }
   else if (!acct.entitled) { text = "Your free trial has ended. Your shoots are safe — choose a plan to keep adding songs."; urgent = true; }
-  else if (!isSubscribed() && trialDays <= 3) text = `Your free trial ends in ${trialDays} day${trialDays === 1 ? "" : "s"}.`;
+  else if (!isSubscribed() && !hasComp() && trialDays <= 3) text = `Your free trial ends in ${trialDays} day${trialDays === 1 ? "" : "s"}.`;
   else if (acct.used > acct.storage_limit_bytes * 0.9) { text = `Storage almost full: ${fmtBytes(acct.used)} of ${fmtBytes(acct.storage_limit_bytes)}.`; action = isSubscribed() ? "manage" : "choose"; }
   if (!text) { b.classList.add("hidden"); return; }
   b.className = "plan-banner" + (urgent ? " urgent" : "");
   b.innerHTML = `<span>${esc(text)}</span><button type="button" class="btn small ${urgent ? "primary" : ""}" data-billing="${action}">${action === "manage" ? "Manage plan" : "Choose a plan"}</button>`;
 }
 function openPlans() {
-  if (!acct) { showNotice("Loading your plan… try again in a second."); refreshAccount(); return; }
-  $("plansList").innerHTML = (acct.plans || []).map(p => `<div class="plan-card ${isSubscribed() && acct.plan === p.id ? "current" : ""}">
+  if (!acct && !billingDown) refreshAccount().then(() => { if (!$("plansModal").classList.contains("hidden")) openPlans(); });
+  $("plansList").innerHTML = planList().map(p => `<div class="plan-card ${isSubscribed() && acct.plan === p.id ? "current" : ""}">
       <strong>${esc(p.name)}</strong>
       <div class="price">$${(p.amount / 100).toFixed(0)}<small> /month</small></div>
       <p>${esc(p.blurb)}</p>
       <button type="button" class="btn ${isSubscribed() && acct.plan === p.id ? "" : "primary"}" data-choose-plan="${p.id}" ${isSubscribed() && acct.plan === p.id ? "disabled" : ""}>${isSubscribed() && acct.plan === p.id ? "Current plan" : isSubscribed() ? "Switch" : "Choose"}</button>
     </div>`).join("");
-  $("plansMsg").textContent = acct.entitled && !isSubscribed() && acct.trial_ends_at ? `You're on the free trial (${daysLeft(acct.trial_ends_at)} days left). Choosing a plan now starts billing today.` : "";
+  $("plansMsg").textContent = billingDown ? "Checkout isn't available right now — please try again shortly."
+    : !acct ? "Loading your plan…"
+    : hasComp() && !isSubscribed() ? `You have ${planName(acct.comp.plan)} for free${acct.comp.until ? ` until ${new Date(acct.comp.until).toLocaleDateString()}` : ""}. No need to pay.`
+    : acct.entitled && !isSubscribed() && acct.trial_ends_at ? `You're on the free trial (${daysLeft(acct.trial_ends_at)} days left). Choosing a plan now starts billing today, and takes you to secure checkout.` : "";
   $("accountModal").classList.add("hidden");
   $("plansModal").classList.remove("hidden");
 }
 const appReturnUrl = () => location.origin + location.pathname;
 async function goToCheckout(plan, btn) {
   if (btn) { btn.disabled = true; btn.textContent = "Opening checkout…"; }
-  try { const r = await billing({ action: "checkout", plan, returnUrl: appReturnUrl() }); location.href = r.url; }
+  try {
+    const r = await billing({ action: "checkout", plan, returnUrl: appReturnUrl() });
+    if (!r || !r.url) throw new Error("Checkout isn't available right now — please try again shortly.");
+    location.href = r.url;
+  }
   catch (e) { $("plansMsg").textContent = e.message; if (btn) { btn.disabled = false; btn.textContent = "Choose"; } }
 }
 async function goToPortal() {
-  try { const r = await billing({ action: "portal", returnUrl: appReturnUrl() }); location.href = r.url; }
+  try {
+    const r = await billing({ action: "portal", returnUrl: appReturnUrl() });
+    if (!r || !r.url) throw new Error("The billing page isn't available right now — please try again shortly.");
+    location.href = r.url;
+  }
   catch (e) { showNotice(e.message); }
 }
 document.addEventListener("click", e => {
@@ -4048,6 +4104,52 @@ async function handleCheckoutReturn() {
   }
   showNotice("Payment received. Your plan will show up in a moment — reopen the account panel to check.");
 }
+
+/* ---- owner tools: free premium access ---- */
+async function renderAdminList() {
+  const box = $("adminList");
+  try {
+    const { people } = await billing({ action: "admin-list" });
+    box.innerHTML = people.length ? people.map(p => `<div class="admin-row" data-email="${esc(p.email)}">
+        <span class="who"><strong>${esc(p.email)}</strong>${esc(planName(p.plan))} · ${p.until ? `until ${new Date(p.until).toLocaleDateString()}` : "no end date"}${p.pending ? " · waiting for them to sign up" : ""}${p.note ? ` · ${esc(p.note)}` : ""}</span>
+        <button type="button" class="btn small danger-text" data-revoke>Remove</button>
+      </div>`).join("") : `<p class="modal-hint">Nobody yet.</p>`;
+  } catch (e) { box.innerHTML = `<p class="modal-hint">${esc(e.message)}</p>`; }
+}
+function openAdmin() {
+  $("accountModal").classList.add("hidden");
+  $("adminModal").classList.remove("hidden");
+  $("adminMsg").textContent = "";
+  $("adminEmail").focus();
+  renderAdminList();
+}
+document.addEventListener("click", e => { if (e.target.closest("[data-open-admin]")) openAdmin(); });
+$("adminGrantBtn").addEventListener("click", async () => {
+  const email = $("adminEmail").value.trim(), btn = $("adminGrantBtn");
+  if (!email) { $("adminMsg").textContent = "Type their email first."; return; }
+  btn.disabled = true;
+  try {
+    const days = $("adminDays").value;
+    const r = await billing({ action: "admin-grant", email, plan: $("adminPlan").value, days: days ? Number(days) : null, note: $("adminNote").value.trim() });
+    $("adminMsg").textContent = r.result === "invited"
+      ? `${email} doesn't have an account yet. They'll get ${planName(r.plan)} free as soon as they sign up with that email.`
+      : `${email} now has ${planName(r.plan)} free${r.until ? ` until ${new Date(r.until).toLocaleDateString()}` : ""}.`;
+    $("adminEmail").value = ""; $("adminNote").value = "";
+    renderAdminList();
+    if (cloudUser && email.toLowerCase() === (cloudUser.email || "").toLowerCase()) refreshAccount();
+  } catch (e) { $("adminMsg").textContent = e.message; }
+  btn.disabled = false;
+});
+$("adminList").addEventListener("click", async e => {
+  const b = e.target.closest("[data-revoke]");
+  if (!b) return;
+  const email = b.closest("[data-email]").dataset.email;
+  if (!confirm(`Remove free access for ${email}? Their shoots stay in their account.`)) return;
+  try { await billing({ action: "admin-revoke", email }); renderAdminList(); if (email.toLowerCase() === (cloudUser.email || "").toLowerCase()) refreshAccount(); }
+  catch (err) { $("adminMsg").textContent = err.message; }
+});
+$("closeAdminBtn").addEventListener("click", () => $("adminModal").classList.add("hidden"));
+$("adminModal").addEventListener("click", e => { if (e.target.id === "adminModal") $("adminModal").classList.add("hidden"); });
 
 /* ---- sign-in gate: the cloud app starts at the account ---- */
 let gateLoading = true;
@@ -4161,7 +4263,8 @@ function renderAccountBody() {
         <div class="meter ${acct.used >= acct.storage_limit_bytes ? "full" : ""}"><span style="width:${Math.min(100, (acct.used / acct.storage_limit_bytes) * 100).toFixed(1)}%"></span></div>
         <p class="modal-hint">${fmtBytes(acct.used)} of ${fmtBytes(acct.storage_limit_bytes)} used in your account</p>
         <div class="acct-actions">${acct.has_billing && (isSubscribed() || acct.subscription_status) ? `<button type="button" class="btn" data-billing="manage">Manage plan &amp; billing</button>` : ""}<button type="button" class="btn ${isSubscribed() ? "" : "primary"}" data-billing="choose">${isSubscribed() ? "Compare plans" : "Choose a plan"}</button></div>`
-      : `<p class="modal-hint">Loading your plan…</p>`}
+      : `<p class="modal-hint">${billingDown ? "Your plan details can't load right now." : "Loading your plan…"}</p>`}
+      ${acct && acct.is_admin ? `<div class="acct-actions"><button type="button" class="btn" data-open-admin>Give free access…</button></div>` : ""}
     </div>
     <div class="acct-section">
       <h4>Songs on this device</h4>
@@ -4187,6 +4290,7 @@ async function onSignedIn(user) {
   renderAccountButton();
   if (!project) renderProjectsList();
   try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) {}   // ask the browser not to clear the app's storage
+  renderPlanButton();
   if (first) { syncNow(); refreshAccount().then(handleCheckoutReturn); }
 }
 async function signOutHere() {
@@ -4198,7 +4302,7 @@ async function signOutHere() {
   for (const p of locals) await localDeleteProject(p.id);
   [DIRTY_KEY, DELETES_KEY, TRACKS_KEY].forEach(k => { try { localStorage.removeItem(k); } catch (e) {} });
   await sb.auth.signOut();
-  cloudUser = null; cloudPlan = ""; lastSyncAt = null; gateLoading = false; acct = null; renderPlanBanner();
+  cloudUser = null; cloudPlan = ""; lastSyncAt = null; gateLoading = false; acct = null; renderPlanBanner(); renderPlanButton();
   setSyncState("off");
   $("accountModal").classList.add("hidden");
   renderProjectsList();
@@ -4373,7 +4477,9 @@ if (APP_MODE === "content") {
   document.querySelector(".type-choices").classList.add("hidden");
   $("newCreateBtn").classList.remove("hidden");
   document.querySelector("#newModal .modal-hint").textContent = "Name the shoot — you can change it later.";
-  document.querySelector("#projectsView .muted").textContent = "Each shoot keeps its own songs, parts, references and takes. Everything is saved in this browser.";
+  document.querySelector("#projectsView .muted").textContent = CLOUD
+    ? "Each shoot keeps its own songs, parts, references and takes. Everything is saved to your account."
+    : "Each shoot keeps its own songs, parts, references and takes. Everything is saved in this browser.";
   document.querySelector(".projects-title").textContent = "Shoots";
 }
 document.querySelectorAll(".sections-container").forEach(wireTableContainer);
