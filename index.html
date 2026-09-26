@@ -104,8 +104,9 @@
   .card p { margin: 0; color: var(--muted); font-size: 15px; }
 
   /* pricing */
-  .plans { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; align-items: stretch; }
-  @media (max-width: 860px) { .plans { grid-template-columns: 1fr; } }
+  .plans { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; align-items: stretch; }
+  @media (max-width: 1000px) { .plans { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .plans { grid-template-columns: 1fr; } }
   .plan { background-color: var(--bg-3); border: 1px solid var(--line); border-radius: 14px; padding: 24px; display: flex; flex-direction: column; gap: 10px; }
   .plan.pick { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .plan .tag { align-self: flex-start; font-size: 11px; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; color: #fff; background-color: var(--accent); border-radius: 999px; padding: 3px 9px; }
@@ -144,7 +145,7 @@
       <a class="hide-sm" href="#pricing">Pricing</a>
       <a class="hide-sm" href="#faq">FAQ</a>
       <a href="app/">Sign in</a>
-      <a class="btn btn-primary" href="app/">Start free trial</a>
+      <a class="btn btn-primary" href="app/">Start free</a>
     </div>
   </div>
 </nav>
@@ -155,10 +156,10 @@
     <h1>Shoot more of the song in less time.</h1>
     <p class="lede">Creatrr turns a song into a shot plan. Mark the parts, stamp your go-to shots on each one, and roll with a click-track count-in cued to the exact spot. Every take is rated and tagged, so your editor knows what to use.</p>
     <div class="cta">
-      <a class="btn btn-primary" href="app/">Start your 14-day free trial</a>
+      <a class="btn btn-primary" href="app/">Start free</a>
       <a class="btn btn-ghost" href="demo/">Try the demo — no sign-up</a>
     </div>
-    <p class="cta-note small">No card needed for the trial.</p>
+    <p class="cta-note small">Free forever for 1 song. No card needed.</p>
     <div class="timeline-strip" aria-hidden="true">
       <div class="parts">
         <div style="flex:4;background-color:var(--teal)">Intro</div>
@@ -229,29 +230,35 @@
 <section id="pricing">
   <div class="wrap">
     <h2>Simple plans. Start free.</h2>
-    <p class="section-lede">Every plan includes every Creatrr feature. Pick the storage you need for your songs and references, and change or cancel any time.</p>
+    <p class="section-lede">Every plan includes every Creatrr feature. Plans differ only in how many songs you keep. MP3 or WAV counts the same, and swapping a song's audio never uses a new slot.</p>
     <div class="plans">
       <div class="plan">
+        <h3>Free</h3>
+        <div class="price">$0<small> forever</small></div>
+        <ul><li><b>1 song</b></li><li>Every feature</li><li>Swap the audio any time</li></ul>
+        <a class="btn btn-ghost" href="app/">Start free</a>
+      </div>
+      <div class="plan">
         <h3>Creatrr</h3>
-        <div class="price">$9<small> /month</small></div>
-        <ul><li><b>25 GB</b> for songs and references</li><li>Unlimited shoots and songs</li><li>Phone and laptop sync</li></ul>
-        <a class="btn btn-ghost" href="app/">Start free trial</a>
+        <div class="price">$5<small> /month</small></div>
+        <ul><li><b>20 songs</b></li><li>Unlimited shoots</li><li>Swap demo MP3s for final WAVs free</li></ul>
+        <a class="btn btn-ghost" href="app/">Get started</a>
       </div>
       <div class="plan pick">
         <span class="tag">Most popular</span>
         <h3>Creatrr Plus</h3>
-        <div class="price">$19<small> /month</small></div>
-        <ul><li><b>100 GB</b> for songs and references</li><li>Unlimited shoots and songs</li><li>Room for hundreds of songs</li></ul>
-        <a class="btn btn-primary" href="app/">Start free trial</a>
+        <div class="price">$15<small> /month</small></div>
+        <ul><li><b>100 songs</b></li><li>Unlimited shoots</li><li>For regular content days</li></ul>
+        <a class="btn btn-primary" href="app/">Get started</a>
       </div>
       <div class="plan">
         <h3>Producrr</h3>
         <div class="price">$29<small> /month</small></div>
-        <ul><li><b>200 GB</b> for songs and references</li><li>Everything in Creatrr Plus</li><li>Music video production tools: locations, schedules, call sheets, live on-set tracker <i>(coming soon)</i></li></ul>
-        <a class="btn btn-ghost" href="app/">Start free trial</a>
+        <ul><li><b>150+ songs</b></li><li>Everything in Creatrr Plus</li><li>Music video production tools: locations, schedules, call sheets, live on-set tracker <i>(coming soon)</i></li></ul>
+        <a class="btn btn-ghost" href="app/">Get started</a>
       </div>
     </div>
-    <p class="trial small">Every account starts with a 14-day free trial with 5 GB of storage. No card needed.</p>
+    <p class="trial small">Start free with 1 song, no card needed. Upgrade, switch or cancel any time — your shoots stay safe on every plan.</p>
   </div>
 </section>
 
@@ -262,7 +269,7 @@
     <details><summary>Do I need to install anything?</summary><p>No. Open creatrr.co/app in Safari or Chrome on your phone, then choose "Add to Home Screen" to launch it like an app. It works the same on a laptop.</p></details>
     <details><summary>What audio files can I use?</summary><p>Anything your browser can play: WAV, MP3, M4A, AIFF and more. Large WAV masters sync as a lighter 16-bit copy so every device plays in perfect time; your original never gets altered.</p></details>
     <details><summary>Who can see my songs?</summary><p>Only you. Songs and shoots are private to your account, protected on the server so no one else can reach them, and never used for anything else.</p></details>
-    <details><summary>What happens when my free trial ends?</summary><p>Nothing is deleted. Your shoots stay safe and viewable; choose a plan to keep adding songs.</p></details>
+    <details><summary>What's included for free?</summary><p>Every feature, forever, for 1 song, and you can swap its audio as often as you like. When you want more songs, pick a plan. If a plan ends, nothing is deleted; you just can't add new songs until you're back within the free plan.</p></details>
     <details><summary>Can I cancel any time?</summary><p>Yes, from your account in a couple of clicks. You keep your plan until the end of the period you've paid for.</p></details>
   </div>
 </section>
@@ -270,9 +277,9 @@
 <section class="final">
   <div class="wrap">
     <h2>Your next shoot, planned to the beat.</h2>
-    <p class="section-lede" style="margin:0 auto 28px">Try it free for 14 days, or play with the demo first.</p>
+    <p class="section-lede" style="margin:0 auto 28px">Start free, or play with the demo first.</p>
     <div class="cta">
-      <a class="btn btn-primary" href="app/">Start your free trial</a>
+      <a class="btn btn-primary" href="app/">Start free</a>
       <a class="btn btn-ghost" href="demo/">Try the demo</a>
     </div>
   </div>

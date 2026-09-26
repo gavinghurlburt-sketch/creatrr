@@ -277,7 +277,14 @@ main { padding: 16px; max-width: 1600px; margin: 0 auto; }
   font-variant-numeric: tabular-nums;
 }
 .tc-display.pulse { background-color: var(--tc-fg); color: var(--tc-bg); }
-.waveform { display: block; width: 100%; height: 88px; border-radius: 7px; margin-top: 10px; cursor: pointer; background-color: var(--wave-bg); }
+.waveform { display: block; width: 100%; height: 96px; border-radius: 7px; margin-top: 10px; cursor: pointer; background-color: var(--wave-bg); touch-action: pan-y; user-select: none; -webkit-user-select: none; }
+.wave-tools { display: flex; align-items: center; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.wave-tools .icon-btn { font-size: 16px; width: 30px; height: 28px; justify-content: center; border: 1px solid var(--border-strong); }
+.wave-tools .zoom-level { font-size: 12px; font-weight: 700; min-width: 30px; text-align: center; font-variant-numeric: tabular-nums; }
+.wave-hint { margin-left: 6px; }
+.bar-shift { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; }
+.bar-shift .btn { padding: 3px 8px; }
+@media (hover: none) { .wave-hint { display: none; } }
 .tempo-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 10px; }
 .tempo-row label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
 #tempoStatus { flex-basis: 100%; }
@@ -811,7 +818,13 @@ table.sched tr.done-row td { background-color: var(--done); }
           <button id="removeTrackBtn" class="btn small danger-text hidden">Remove track</button>
         </div>
         <div id="trackCloudStatus" class="muted small track-cloud-status"></div>
-        <canvas id="waveformCanvas" class="waveform hidden" aria-label="Waveform — click to seek"></canvas>
+        <canvas id="waveformCanvas" class="waveform hidden" aria-label="Waveform — tap to set the playhead, swipe sideways to scroll"></canvas>
+        <div class="wave-tools" data-for="waveformCanvas">
+          <button type="button" class="icon-btn" data-zoom="out" aria-label="Zoom out">−</button>
+          <span class="zoom-level">1×</span>
+          <button type="button" class="icon-btn" data-zoom="in" aria-label="Zoom in">+</button>
+          <span class="muted small wave-hint">Swipe or scroll sideways to move · ← → keys jump a bar</span>
+        </div>
         <div class="tempo-row">
           <label>BPM <input type="number" id="bpmInput" class="field num" min="30" max="300" step="0.1" placeholder="—"></label>
           <button id="detectTempoBtn" class="btn small" disabled>Detect tempo &amp; song start</button>
@@ -820,7 +833,17 @@ table.sched tr.done-row td { background-color: var(--done); }
             <option value="1">1 bar</option>
             <option value="2">2 bars</option>
           </select>
-          <label class="check" title="Moves each cue to the nearest beat so the count-in lines up with the song"><input type="checkbox" id="snapToggle"> Snap cues to the beat</label>
+          <label title="Where taps on the waveform, pasted times and cues land">Snap to
+            <select id="snapMode" class="field">
+              <option value="bar">bars (downbeats)</option>
+              <option value="beat">beats</option>
+              <option value="off">off</option>
+            </select>
+          </label>
+          <span class="bar-shift" title="If the bar lines aren't on the “1”, shift them by a beat">Bar lines
+            <button type="button" class="btn small" id="barShiftBack" aria-label="Shift bar lines one beat earlier">◀</button>
+            <button type="button" class="btn small" id="barShiftFwd" aria-label="Shift bar lines one beat later">▶</button>
+          </span>
           <span id="tempoStatus" class="muted small"></span>
         </div>
       </div>
@@ -941,7 +964,12 @@ table.sched tr.done-row td { background-color: var(--done); }
               </select>
             </label>
           </div>
-          <canvas id="shootWave" class="waveform small-wave hidden" aria-label="Waveform — click to jump"></canvas>
+          <canvas id="shootWave" class="waveform small-wave hidden" aria-label="Waveform — tap to jump, swipe sideways to scroll"></canvas>
+          <div class="wave-tools" data-for="shootWave">
+            <button type="button" class="icon-btn" data-zoom="out" aria-label="Zoom out">−</button>
+            <span class="zoom-level">1×</span>
+            <button type="button" class="icon-btn" data-zoom="in" aria-label="Zoom in">+</button>
+          </div>
         </div>
         </div>
         <div class="panel" id="currentShot"></div>
@@ -1146,7 +1174,7 @@ table.sched tr.done-row td { background-color: var(--done); }
     <p class="modal-hint">Give friends (or yourself) a plan without paying. If they haven't signed up yet, it applies the moment they create an account with that email.</p>
     <div class="admin-form">
       <input type="email" id="adminEmail" class="field" placeholder="their@email.com" autocomplete="off">
-      <select id="adminPlan" class="field" aria-label="Plan"><option value="creatrr">Creatrr (25 GB)</option><option value="creatrr_plus" selected>Creatrr Plus (100 GB)</option><option value="producrr">Producrr (200 GB)</option></select>
+      <select id="adminPlan" class="field" aria-label="Plan"><option value="creatrr">Creatrr (20 songs)</option><option value="creatrr_plus" selected>Creatrr Plus (100 songs)</option><option value="producrr">Producrr (150+ songs)</option></select>
       <select id="adminDays" class="field" aria-label="How long"><option value="30">1 month</option><option value="90">3 months</option><option value="365">1 year</option><option value="">No end date</option></select>
       <input type="text" id="adminNote" class="field" placeholder="Note (optional), e.g. band member">
       <button type="button" id="adminGrantBtn" class="btn primary">Give access</button>
@@ -1232,7 +1260,7 @@ const DEFAULT_TEMPLATES = [
   { name: "Handheld", detail: "Moving with the energy" },
   { name: "Slow-mo", detail: "60–120 fps" }
 ];
-function defaultTempo() { return { bpm: null, offset: null, songStart: null, detected: false, countIn: false, bars: 2, snap: false, lead: 0 }; }
+function defaultTempo() { return { bpm: null, offset: null, songStart: null, detected: false, countIn: false, bars: 2, snap: false, snapMode: "bar", barShift: 0, lead: 0 }; }
 
 /* ================= helpers ================= */
 const $ = id => document.getElementById(id);
@@ -1545,7 +1573,7 @@ function timestampCell(r) {
 }
 function pastePlayhead() {
   if (!player.src) { alert("Load the track first, then play or click the waveform to the spot you want."); return null; }
-  return fmtTC(transportTime());
+  return fmtTC(snapTime(transportTime()));
 }
 const COLUMNS = [
   { id: "take", label: "Full / Cut", width: 96, cell: r => takeToggleHtml(r) },
@@ -2157,14 +2185,24 @@ function scheduleClick(c, time, accent) {
   osc.start(time); osc.stop(time + 0.07);
   return osc;
 }
-function cueTarget(t) {
+/* ---- beat grid & snapping ---- */
+function snapMode() { const tp = curTempo(); return tp.snapMode || (tp.snap ? "beat" : "bar"); }
+function beatGrid() {
   const tp = curTempo();
-  if (tp.snap && tp.bpm && tp.offset != null) {
-    const beat = 60 / tp.bpm;
-    return Math.max(0, tp.offset + Math.round((t - tp.offset) / beat) * beat);
-  }
-  return t;
+  if (!(tp.bpm && tp.offset != null)) return null;
+  const beat = 60 / tp.bpm;
+  return { beat, bar: beat * 4, origin: tp.offset + (tp.barShift || 0) * beat };   // origin = a "1"
 }
+function snapTime(t, mode) {
+  const grid = beatGrid();
+  mode = mode || snapMode();
+  if (!grid || mode === "off" || !isFinite(t)) return t;
+  const step = mode === "bar" ? grid.bar : grid.beat;
+  let snapped = grid.origin + Math.round((t - grid.origin) / step) * step;
+  if (snapped < 0) snapped += step;
+  return Math.max(0, snapped);
+}
+function cueTarget(t) { return snapTime(t); }
 let playToken = 0;
 async function playFrom(target, withCountIn) {
   const token = ++playToken;
@@ -2309,15 +2347,34 @@ async function decodeTrack(blob, autoDetect) {
     if (token === decodeToken) setTempoStatus("This file plays, but it couldn't be analyzed for a waveform or tempo. An MP3 or WAV usually works.");
   }
 }
+/* Waveform data. Loud modern masters peak near full scale almost everywhere, so drawing raw peaks
+   looks like a solid brick. We also measure loudness (RMS) per slice, convert to decibels and
+   stretch it across the song's own quiet-to-loud range, so sections read clearly. */
 function computePeaks(buf) {
-  const ch = buf.getChannelData(0), n = 1200, size = Math.max(1, Math.floor(ch.length / n)), out = [];
+  const n = Math.min(12000, Math.max(1500, Math.round(buf.duration * 40)));   // ~25 ms slices, enough for deep zoom
+  const c0 = buf.getChannelData(0), c1 = buf.numberOfChannels > 1 ? buf.getChannelData(1) : null;
+  const size = Math.max(1, Math.floor(c0.length / n));
+  const min = new Float32Array(n), max = new Float32Array(n), db = new Float32Array(n);
   for (let i = 0; i < n; i++) {
-    let min = 0, max = 0;
-    const s = i * size, e = Math.min(s + size, ch.length);
-    for (let j = s; j < e; j += 4) { const v = ch[j]; if (v < min) min = v; if (v > max) max = v; }
-    out.push([min, max]);
+    let mn = 0, mx = 0, sum = 0, cnt = 0;
+    const s = i * size, e = Math.min(s + size, c0.length);
+    for (let j = s; j < e; j += 2) {
+      const v = c1 ? (c0[j] + c1[j]) * 0.5 : c0[j];
+      if (v < mn) mn = v; if (v > mx) mx = v;
+      sum += v * v; cnt++;
+    }
+    min[i] = mn; max[i] = mx;
+    db[i] = 10 * Math.log10(cnt ? sum / cnt + 1e-10 : 1e-10);
   }
-  return out;
+  const sorted = Array.from(db).filter(v => v > -70).sort((a, b) => a - b);
+  const pct = q => sorted.length ? sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] : 0;
+  const lo = pct(0.08), hi = pct(0.995);
+  const loud = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = Math.max(0, Math.min(1, (db[i] - lo) / Math.max(1, hi - lo)));
+    loud[i] = db[i] <= -70 ? 0 : 0.05 + 0.95 * Math.pow(x, 1.35);
+  }
+  return { n, min, max, loud };
 }
 
 /* ---------- tempo & song-start detection ---------- */
@@ -2421,8 +2478,10 @@ function syncTempoInputs() {
   if (document.activeElement !== $("bpmInput")) $("bpmInput").value = tp.bpm || "";
   $("countInToggle").checked = !!tp.countIn;
   $("countInBars").value = String(tp.bars || 2);
-  $("snapToggle").checked = !!tp.snap;
-  $("snapToggle").disabled = !(tp.bpm && tp.offset != null);
+  $("snapMode").value = snapMode();
+  const hasGrid = !!(tp.bpm && tp.offset != null);
+  $("snapMode").disabled = !hasGrid;
+  $("barShiftBack").disabled = $("barShiftFwd").disabled = !hasGrid;
   $("leadSelect").value = String(tp.lead || 0);
 }
 
@@ -2445,31 +2504,67 @@ function drawWaveBase(canvas, h) {
   g.fillRect(0, 0, w, h);
   return { g, w };
 }
-function drawPeaks(g, w, top, h, dur) {
+/* The visible slice of the song for a zoomable canvas: { start, span } in seconds. */
+function waveView(canvas, dur) {
+  const v = canvas && canvas._view;
+  if (!v || !dur || v.zoom <= 1) return { start: 0, span: dur, zoom: 1 };
+  const span = dur / v.zoom;
+  v.start = Math.max(0, Math.min(dur - span, v.start || 0));
+  return { start: v.start, span, zoom: v.zoom };
+}
+function drawPeaks(g, w, top, h, dur, view) {
+  view = view || { start: 0, span: dur, zoom: 1 };
+  const X = t => ((t - view.start) / view.span) * w;
+  if (!peaks || !dur) return;
+  const mid = top + h / 2, half = h / 2 * 0.94;
+  const n = peaks.n;
+  for (let x = 0; x < w; x++) {
+    const t0 = view.start + (x / w) * view.span, t1 = view.start + ((x + 1) / w) * view.span;
+    let i0 = Math.floor((t0 / dur) * n), i1 = Math.max(i0 + 1, Math.floor((t1 / dur) * n));
+    if (i0 >= n) break;
+    i1 = Math.min(n, i1);
+    let mn = 0, mx = 0, ld = 0;
+    for (let i = i0; i < i1; i++) { if (peaks.min[i] < mn) mn = peaks.min[i]; if (peaks.max[i] > mx) mx = peaks.max[i]; if (peaks.loud[i] > ld) ld = peaks.loud[i]; }
+    g.fillStyle = "rgba(74,222,128,0.22)";                          // raw peaks, faint
+    g.fillRect(x, mid - mx * half, 1, Math.max(1, (mx - mn) * half));
+    g.fillStyle = "#4ade80";                                        // loudness, the readable shape
+    const lh = ld * half;
+    g.fillRect(x, mid - lh, 1, Math.max(1, lh * 2));
+  }
+  drawGrid(g, w, top, h, dur, view, X);
   const tp = curTempo();
-  if (dur && tp.bpm && tp.offset != null) {
-    const beat = 60 / tp.bpm;
-    for (let k = -Math.floor(tp.offset / beat); ; k++) {
-      const t = tp.offset + k * beat;
-      if (t > dur) break;
-      if (t < 0) continue;
-      g.fillStyle = (((k % 4) + 4) % 4 === 0) ? "rgba(255,255,255,0.16)" : "rgba(255,255,255,0.06)";
-      g.fillRect((t / dur) * w, top, 1, h);
+  if (tp.songStart != null && tp.songStart >= view.start && tp.songStart <= view.start + view.span) { g.fillStyle = "#f59e0b"; g.fillRect(X(tp.songStart), top, 2, h); }
+}
+/* Beat/bar grid drawn over the waveform: dark lines read on the green, bar numbers sit on small tabs. */
+function drawGrid(g, w, top, h, dur, view, X) {
+  const grid = beatGrid();
+  if (!dur || !grid) return;
+  const pxPerBeat = (grid.beat / view.span) * w;
+  const kStart = Math.floor((view.start - grid.origin) / grid.beat) - 1;
+  g.font = "bold 9px -apple-system, sans-serif";
+  for (let k = kStart; ; k++) {
+    const t = grid.origin + k * grid.beat;
+    if (t > view.start + view.span || t > dur) break;
+    if (t < 0) continue;
+    const isBar = ((k % 4) + 4) % 4 === 0;
+    if (!isBar && pxPerBeat < 7) continue;                          // beats only once they're spread out
+    if (isBar && pxPerBeat * 4 < 5) continue;
+    const x = Math.round(X(t));
+    g.fillStyle = isBar ? "rgba(8,10,13,0.7)" : "rgba(8,10,13,0.3)";
+    g.fillRect(x, top, isBar ? 1.5 : 1, h);
+    if (isBar && pxPerBeat * 4 >= 30) {                             // bar numbers once there's room
+      const barNo = Math.round(k / 4) + 1;
+      if (barNo >= 1) {
+        const label = String(barNo), tw = g.measureText(label).width;
+        g.fillStyle = "rgba(8,10,13,0.8)"; g.fillRect(x + 2, top + h - 14, tw + 6, 12);
+        g.fillStyle = "#e5e7eb"; g.fillText(label, x + 5, top + h - 5);
+      }
     }
   }
-  if (!peaks) return;
-  const mid = top + h / 2, bw = w / peaks.length;
-  g.fillStyle = "#4ade80";
-  for (let i = 0; i < peaks.length; i++) {
-    const [mn, mx] = peaks[i];
-    const y1 = mid - mx * h / 2 * 0.92, y2 = mid - mn * h / 2 * 0.92;
-    g.fillRect(i * bw, y1, Math.max(1, bw - 0.3), Math.max(1, y2 - y1));
-  }
-  if (dur && tp.songStart != null) { g.fillStyle = "#f59e0b"; g.fillRect((tp.songStart / dur) * w, top, 2, h); }
 }
 function drawWaveOn(canvas) {
   if (!canvas || canvas.classList.contains("hidden") || !canvas.offsetParent) return;
-  const h = canvas.clientHeight || 88;
+  const h = canvas.clientHeight || 96;
   const { g, w } = drawWaveBase(canvas, h);
   const dur = trackDuration();
   if (!peaks) {
@@ -2477,32 +2572,144 @@ function drawWaveOn(canvas) {
     if (player.src) g.fillText("Reading the waveform…", 10, h / 2);
     return;
   }
-  drawPeaks(g, w, 0, h, dur);
+  const view = waveView(canvas, dur);
+  drawPeaks(g, w, 0, h, dur, view);
   if (!dur) return;
-  g.font = "10px -apple-system, sans-serif";
+  const X = t => ((t - view.start) / view.span) * w;
+  g.font = "bold 11px -apple-system, sans-serif";
   waveMarkers().forEach(m => {
-    if (m.t > dur) return;
-    const x = (m.t / dur) * w;
+    if (m.t > dur || m.t < view.start - view.span * 0.02 || m.t > view.start + view.span) return;
+    const x = X(m.t);
     g.fillStyle = m.color;
-    if (isContent()) { g.fillRect(x, 0, 2, h); }
-    g.beginPath(); g.moveTo(x - 4, 0); g.lineTo(x + 4, 0); g.lineTo(x, 7); g.closePath(); g.fill();
-    if (m.label) { g.fillStyle = "#e5e7eb"; g.fillText(m.label, x + 5, 10); }
+    if (isContent()) g.fillRect(x, 0, 2, h);
+    g.beginPath(); g.moveTo(x - 5, 0); g.lineTo(x + 5, 0); g.lineTo(x, 8); g.closePath(); g.fill();
+    if (m.label) {                                                  // label in the marker's color, on a dark tab so it reads over the waveform
+      const tw = g.measureText(m.label).width;
+      g.fillStyle = "rgba(13,16,20,0.85)"; g.fillRect(x + 4, 1, tw + 8, 15);
+      g.fillStyle = m.color; g.fillText(m.label, x + 8, 12);
+    }
   });
-  g.fillStyle = "#ffffff"; g.fillRect((transportTime() / dur) * w - 1, 0, 2, h);
+  const px = X(transportTime());
+  if (px >= -2 && px <= w + 2) { g.fillStyle = "#ffffff"; g.fillRect(px - 1, 0, 2, h); }
+  if (view.zoom > 1) {                                              // position within the song
+    const bw = Math.max(18, w / view.zoom), bx = (view.start / dur) * w;
+    g.fillStyle = "rgba(255,255,255,0.12)"; g.fillRect(0, h - 3, w, 3);
+    g.fillStyle = "rgba(255,255,255,0.55)"; g.fillRect(bx, h - 3, bw, 3);
+  }
+}
+function followPlayhead(canvas) {
+  const v = canvas._view, dur = trackDuration();
+  if (!v || v.zoom <= 1 || !dur || v.dragging) return;
+  const span = dur / v.zoom, t = transportTime();
+  if (t < v.start || t > v.start + span * 0.92) v.start = Math.max(0, Math.min(dur - span, t - span * 0.1));
 }
 function drawWaveform() {
+  if (isPlaying()) { followPlayhead($("waveformCanvas")); followPlayhead($("shootWave")); }
   drawWaveOn($("waveformCanvas"));
   drawWaveOn($("shootWave"));
   if (currentWs === "cut" && project) drawCutTimeline();
 }
-function seekFromCanvas(e) {
+function setZoom(canvas, zoom, anchorT) {
   const dur = trackDuration();
   if (!dur) return;
-  const rect = e.currentTarget.getBoundingClientRect();
-  setPosition(((e.clientX - rect.left) / rect.width) * dur);
+  const v = canvas._view || (canvas._view = { zoom: 1, start: 0 });
+  const old = waveView(canvas, dur);
+  zoom = Math.max(1, Math.min(32, zoom));
+  const anchor = anchorT != null ? anchorT : transportTime();
+  const frac = old.span ? (anchor - old.start) / old.span : 0.5;
+  v.zoom = zoom;
+  v.start = anchor - (dur / zoom) * Math.max(0, Math.min(1, frac));
+  const tools = document.querySelector(`.wave-tools[data-for="${canvas.id}"] .zoom-level`);
+  if (tools) tools.textContent = `${Math.round(zoom)}×`;
+  drawWaveform();
 }
-$("waveformCanvas").addEventListener("click", seekFromCanvas);
-$("shootWave").addEventListener("click", seekFromCanvas);
+/* Tap = set the playhead (snapped to the grid). Swipe/drag sideways = scroll when zoomed. Pinch = zoom. */
+function wireWaveCanvas(canvas) {
+  const pointers = new Map();
+  let startX = 0, startView = 0, moved = false, pinch0 = null;
+  canvas.addEventListener("pointerdown", e => {
+    pointers.set(e.pointerId, e.clientX);
+    if (pointers.size === 2) {
+      const xs = [...pointers.values()];
+      pinch0 = { dist: Math.abs(xs[0] - xs[1]) || 1, zoom: (canvas._view && canvas._view.zoom) || 1 };
+      return;
+    }
+    startX = e.clientX; moved = false;
+    startView = canvas._view ? canvas._view.start : 0;
+    try { canvas.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+  canvas.addEventListener("pointermove", e => {
+    if (!pointers.has(e.pointerId)) return;
+    pointers.set(e.pointerId, e.clientX);
+    const dur = trackDuration();
+    if (pinch0 && pointers.size === 2) {
+      const xs = [...pointers.values()];
+      const rect = canvas.getBoundingClientRect(), view = waveView(canvas, dur);
+      const midT = view.start + (((xs[0] + xs[1]) / 2 - rect.left) / rect.width) * view.span;
+      setZoom(canvas, pinch0.zoom * ((Math.abs(xs[0] - xs[1]) || 1) / pinch0.dist), midT);
+      moved = true;
+      return;
+    }
+    const v = canvas._view;
+    if (!v || v.zoom <= 1 || !dur) return;
+    const dx = e.clientX - startX;
+    if (Math.abs(dx) > 6) moved = true;
+    if (moved) {
+      v.dragging = true;
+      v.start = startView - (dx / canvas.clientWidth) * (dur / v.zoom);
+      drawWaveform();
+    }
+  });
+  const end = e => {
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) pinch0 = null;
+    if (canvas._view) canvas._view.dragging = false;
+    if (pointers.size === 0 && !moved && e.type === "pointerup") {
+      const dur = trackDuration();
+      if (!dur) return;
+      const rect = canvas.getBoundingClientRect(), view = waveView(canvas, dur);
+      setPosition(snapTime(view.start + ((e.clientX - rect.left) / rect.width) * view.span));
+    }
+  };
+  canvas.addEventListener("pointerup", end);
+  canvas.addEventListener("pointercancel", end);
+  canvas.addEventListener("wheel", e => {                           // trackpad: sideways scroll pans, pinch/ctrl-scroll zooms
+    const dur = trackDuration();
+    if (!dur) return;
+    const v = canvas._view || (canvas._view = { zoom: 1, start: 0 });
+    if (e.ctrlKey) {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect(), view = waveView(canvas, dur);
+      setZoom(canvas, v.zoom * Math.exp(-e.deltaY * 0.01), view.start + ((e.clientX - rect.left) / rect.width) * view.span);
+    } else if (v.zoom > 1 && Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+      e.preventDefault();
+      v.start += (e.deltaX / canvas.clientWidth) * (dur / v.zoom);
+      drawWaveform();
+    }
+  }, { passive: false });
+}
+wireWaveCanvas($("waveformCanvas"));
+wireWaveCanvas($("shootWave"));
+document.addEventListener("click", e => {
+  const b = e.target.closest(".wave-tools [data-zoom]");
+  if (!b) return;
+  const canvas = $(b.closest(".wave-tools").dataset.for);
+  const z = (canvas._view && canvas._view.zoom) || 1;
+  setZoom(canvas, b.dataset.zoom === "in" ? z * 2 : z / 2);
+});
+/* ← / → jump one bar (or beat, per the snap setting) when you're not typing. */
+document.addEventListener("keydown", e => {
+  if (!project || !player.src || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  const tag = (document.activeElement && document.activeElement.tagName) || "";
+  if (/INPUT|TEXTAREA|SELECT/.test(tag) || (document.activeElement && document.activeElement.isContentEditable)) return;
+  if (!$("lightbox").classList.contains("hidden") && $("lightbox").classList.contains("open")) return;
+  e.preventDefault();
+  const grid = beatGrid(), mode = snapMode();
+  const step = grid ? (mode === "beat" ? grid.beat : grid.bar) : 1;
+  const here = grid && mode !== "off" ? snapTime(transportTime(), mode === "beat" ? "beat" : "bar") : transportTime();
+  setPosition(Math.max(0, Math.min(trackDuration(), here + (e.key === "ArrowRight" ? step : -step))));
+});
 $("leadSelect").addEventListener("change", e => { curTempo().lead = parseInt(e.target.value, 10) || 0; scheduleSave(); });
 window.addEventListener("resize", () => drawWaveform());
 
@@ -2604,12 +2811,15 @@ $("bpmInput").addEventListener("input", e => {
   const v = parseFloat(e.target.value);
   curTempo().bpm = isFinite(v) && v >= 30 && v <= 300 ? v : null;
   if (curTempo().bpm && curTempo().offset == null) curTempo().offset = curTempo().songStart || 0;
-  $("snapToggle").disabled = !(curTempo().bpm && curTempo().offset != null);
+  syncTempoInputs();
   scheduleSave(); drawWaveform();
 });
 $("countInToggle").addEventListener("change", e => { curTempo().countIn = e.target.checked; scheduleSave(); });
 $("countInBars").addEventListener("change", e => { curTempo().bars = parseInt(e.target.value, 10) || 2; scheduleSave(); });
-$("snapToggle").addEventListener("change", e => { curTempo().snap = e.target.checked; scheduleSave(); });
+$("snapMode").addEventListener("change", e => { curTempo().snapMode = e.target.value; scheduleSave(); });
+function shiftBars(d) { const tp = curTempo(); tp.barShift = (((tp.barShift || 0) + d) % 4 + 4) % 4; scheduleSave(); drawWaveform(); }
+$("barShiftBack").addEventListener("click", () => shiftBars(-1));
+$("barShiftFwd").addEventListener("click", () => shiftBars(1));
 $("shootPlayBtn").addEventListener("click", togglePlay);
 $("cutPlayBtn").addEventListener("click", togglePlay);
 $("draftPlayBtn").addEventListener("click", togglePlay);
@@ -3814,6 +4024,7 @@ async function markTrackBlocked(key, name, reason) {
 }
 async function clearBlockedTracks() {
   let any = false;
+  songLimitHit = false;
   for (const p of await listProjects()) {
     let changed = false;
     for (const [k, e] of Object.entries(p.cloudTracks || {})) if (e && e.blocked) { delete p.cloudTracks[k]; changed = true; }
@@ -3822,7 +4033,9 @@ async function clearBlockedTracks() {
   if (any) scheduleSync(300);
 }
 /* Only once the file is really in storage does the shoot say so — then other devices can download it. */
+let acctRefreshTimer = null;
 async function markTrackUploaded(key, name, bytes, note) {
+  clearTimeout(acctRefreshTimer); acctRefreshTimer = setTimeout(refreshAccount, 1500);
   const pid = key.split("::")[0];
   const entry = { name, at: new Date().toISOString(), bytes, uploaded: true, note };
   const now = new Date().toISOString();
@@ -3925,7 +4138,9 @@ async function syncNow(pass = 0) {
         let grant;
         try { grant = await billing({ action: "upload-url", path: trackPath(key), bytes: blob.size }); }
         catch (e) {
-          if (e.code === "quota" || e.code === "no_plan") {
+          if (e.code === "too_big") { await markTrackUnsyncable(key, local.name, local.blob.size); done(); continue; }
+          if (e.code === "song_limit" || e.code === "quota" || e.code === "no_plan") {
+            if (e.code === "song_limit") { songLimitHit = true; renderPlanBanner(); }
             await markTrackBlocked(key, local.name, e.code);
             showNotice(e.message);
             refreshAccount();
@@ -4039,9 +4254,9 @@ async function syncNow(pass = 0) {
 let acct = null;   // { plan, subscription_status, trial_ends_at, current_period_end, storage_limit_bytes, used, entitled, plans, has_billing, comp, is_admin }
 let billingDown = false;
 const BUILTIN_PLANS = [
-  { id: "creatrr", name: "Creatrr", amount: 900, gb: 25, blurb: "Content shoots, 25 GB for songs and references" },
-  { id: "creatrr_plus", name: "Creatrr Plus", amount: 1900, gb: 100, blurb: "Content shoots, 100 GB for songs and references" },
-  { id: "producrr", name: "Producrr", amount: 2900, gb: 200, blurb: "Everything, 200 GB, plus video production tools" }
+  { id: "creatrr", name: "Creatrr", amount: 500, songs: 20, label: "20 songs", blurb: "Content shoots with up to 20 songs" },
+  { id: "creatrr_plus", name: "Creatrr Plus", amount: 1500, songs: 100, label: "100 songs", blurb: "Content shoots with up to 100 songs" },
+  { id: "producrr", name: "Producrr", amount: 2900, songs: 250, label: "150+ songs", blurb: "Everything, 150+ songs, plus video production tools" }
 ];
 const planList = () => (acct && Array.isArray(acct.plans) && acct.plans.length) ? acct.plans : BUILTIN_PLANS;
 async function billing(body) {
@@ -4063,7 +4278,7 @@ async function refreshAccount() {
     if (!st || !Array.isArray(st.plans)) throw new Error("Billing replied in an unexpected way");   // e.g. the function is still Supabase's sample code
     acct = st; billingDown = false;
   } catch (e) { console.error("Billing status:", e.message); billingDown = true; renderPlanButton(); return acct; }
-  if (acct.entitled && (!prev || !prev.entitled || acct.storage_limit_bytes > prev.storage_limit_bytes)) clearBlockedTracks();
+  if (!prev || acct.song_limit > prev.song_limit || acct.songs_used < prev.songs_used) clearBlockedTracks();   // room opened up
   renderPlanBanner();
   if (!$("accountModal").classList.contains("hidden")) renderAccountBody();
   return acct;
@@ -4085,19 +4300,26 @@ function planSummary() {
   if (acct.subscription_status === "past_due") return `${planName(acct.plan)} — the last payment didn't go through. Update your card to keep your plan.`;
   if (hasComp() && !isSubscribed()) return `${planName(acct.comp.plan)} · complimentary${acct.comp.until ? ` until ${new Date(acct.comp.until).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}` : ""}`;
   if (isSubscribed()) return `${planName(acct.plan)}${acct.current_period_end ? ` · renews ${new Date(acct.current_period_end).toLocaleDateString(undefined, { month: "short", day: "numeric" })}` : ""}`;
-  if (acct.entitled && acct.trial_ends_at) { const d = daysLeft(acct.trial_ends_at); return `Free trial · ${d} day${d === 1 ? "" : "s"} left`; }
-  return "Your free trial has ended";
+  return `Free plan · ${acct.free_songs || 1} song`;
+}
+let songLimitHit = false;
+function songLimitText() {           // "…is/are in use" phrase for the plan's song allowance
+  if (!acct) return "your songs are all in use";
+  if (acct.song_limit === 1) return "your free song is already in use";
+  return acct.song_limit >= 250 ? "your plan's songs are all in use" : `all ${acct.song_limit} songs on your plan are in use`;
+}
+function songUsageText() {
+  const used = acct.songs_used || 0, n = acct.song_limit || 1;
+  const cap = n >= 250 ? "150+" : String(n);
+  return `${used} of ${cap} song${n === 1 ? "" : "s"} used · swapping a song's audio is always free`;
 }
 function renderPlanBanner() {
   const b = $("planBanner");
   renderPlanButton();
   if (!CLOUD || !cloudUser || !acct) { b.classList.add("hidden"); return; }
   let text = "", urgent = false, action = "choose";
-  const trialDays = acct.trial_ends_at ? daysLeft(acct.trial_ends_at) : 0;
   if (acct.subscription_status === "past_due") { text = "Your last payment didn't go through."; urgent = true; action = "manage"; }
-  else if (!acct.entitled) { text = "Your free trial has ended. Your shoots are safe — choose a plan to keep adding songs."; urgent = true; }
-  else if (!isSubscribed() && !hasComp() && trialDays <= 3) text = `Your free trial ends in ${trialDays} day${trialDays === 1 ? "" : "s"}.`;
-  else if (acct.used > acct.storage_limit_bytes * 0.9) { text = `Storage almost full: ${fmtBytes(acct.used)} of ${fmtBytes(acct.storage_limit_bytes)}.`; action = isSubscribed() ? "manage" : "choose"; }
+  else if (songLimitHit) { text = `A new song is waiting: ${songLimitText()}. Upgrade, or remove a song to make room — swapping a song's audio is always free.`; action = isSubscribed() ? "manage" : "choose"; }
   if (!text) { b.classList.add("hidden"); return; }
   b.className = "plan-banner" + (urgent ? " urgent" : "");
   b.innerHTML = `<span>${esc(text)}</span><button type="button" class="btn small ${urgent ? "primary" : ""}" data-billing="${action}">${action === "manage" ? "Manage plan" : "Choose a plan"}</button>`;
@@ -4107,13 +4329,13 @@ function openPlans() {
   $("plansList").innerHTML = planList().map(p => `<div class="plan-card ${isSubscribed() && acct.plan === p.id ? "current" : ""}">
       <strong>${esc(p.name)}</strong>
       <div class="price">$${(p.amount / 100).toFixed(0)}<small> /month</small></div>
-      <p>${esc(p.blurb)}</p>
+      <p><b>${esc(p.label || (p.songs + " songs"))}</b> · ${esc(p.id === "producrr" ? "plus video production tools" : "content shoots")}</p>
       <button type="button" class="btn ${isSubscribed() && acct.plan === p.id ? "" : "primary"}" data-choose-plan="${p.id}" ${isSubscribed() && acct.plan === p.id ? "disabled" : ""}>${isSubscribed() && acct.plan === p.id ? "Current plan" : isSubscribed() ? "Switch" : "Choose"}</button>
     </div>`).join("");
   $("plansMsg").textContent = billingDown ? "Checkout isn't available right now — please try again shortly."
     : !acct ? "Loading your plan…"
     : hasComp() && !isSubscribed() ? `You have ${planName(acct.comp.plan)} for free${acct.comp.until ? ` until ${new Date(acct.comp.until).toLocaleDateString()}` : ""}. No need to pay.`
-    : acct.entitled && !isSubscribed() && acct.trial_ends_at ? `You're on the free trial (${daysLeft(acct.trial_ends_at)} days left). Choosing a plan now starts billing today, and takes you to secure checkout.` : "";
+    : !isSubscribed() ? `You're on the free plan (1 song). Choosing a plan takes you to secure checkout.` : "";
   $("accountModal").classList.add("hidden");
   $("plansModal").classList.remove("hidden");
 }
@@ -4229,8 +4451,9 @@ async function updateTrackCloudStatus() {
     text = `✓ In your account${entry.note ? ` (synced as a ${entry.note})` : ""} · ${cached ? "downloaded to this device" : "streaming, not kept on this device"}`;
   } else if (entry && entry.tooBig) { text = "Too long to sync, so it's only on this device."; warn = true; }
   else if (entry && entry.unreadable) { text = "This device lost its copy of this song (an iPhone storage quirk). Upload the track again here, or open the shoot on the device that has the file."; warn = true; }
+  else if (entry && entry.blocked === "song_limit") { text = `Not uploaded yet — ${songLimitText()}. Upgrade, or remove a song to make room. It uploads by itself once there's space.`; warn = true; }
   else if (entry && entry.blocked === "quota") { text = "Not uploaded — your storage is full. Upgrade your plan or remove some songs."; warn = true; }
-  else if (entry && entry.blocked === "no_plan") { text = "Not uploaded — your free trial has ended. Choose a plan to keep adding songs."; warn = true; }
+  else if (entry && entry.blocked === "no_plan") { text = "Not uploaded — choose a plan to keep adding songs."; warn = true; }
   else { text = "Not in your account yet — it will upload on the next sync."; warn = true; }
   if (trackKey() !== key) return;
   el.textContent = text;
@@ -4295,7 +4518,7 @@ function renderAccountBody() {
   const body = $("accountBody");
   if (!cloudUser) {
     body.innerHTML = `<h3>Your ${APP_NAME} account</h3>
-      <p class="modal-hint">Sign in to back up your shoots and open them on your phone and laptop. Free during the beta.</p>
+      <p class="modal-hint">Sign in to back up your shoots and open them on your phone and laptop. Free to start with 1 song, no card needed.</p>
       <label class="block">Email <input type="email" id="acctEmail" class="field" autocomplete="email" inputmode="email"></label>
       <label class="block">Password <input type="password" id="acctPass" class="field" autocomplete="current-password"></label>
       <div class="acct-actions"><button type="button" class="btn primary" data-acct="signin">Sign in</button><button type="button" class="btn" data-acct="signup">Create account</button></div>
@@ -4314,9 +4537,9 @@ function renderAccountBody() {
     <div class="acct-section">
       <h4>Plan</h4>
       ${acct ? `<p style="margin:0 0 2px">${esc(planSummary())}</p>
-        <div class="meter ${acct.used >= acct.storage_limit_bytes ? "full" : ""}"><span style="width:${Math.min(100, (acct.used / acct.storage_limit_bytes) * 100).toFixed(1)}%"></span></div>
-        <p class="modal-hint">${fmtBytes(acct.used)} of ${fmtBytes(acct.storage_limit_bytes)} used in your account</p>
-        <div class="acct-actions">${acct.has_billing && (isSubscribed() || acct.subscription_status) ? `<button type="button" class="btn" data-billing="manage">Manage plan &amp; billing</button>` : ""}<button type="button" class="btn ${isSubscribed() ? "" : "primary"}" data-billing="choose">${isSubscribed() ? "Compare plans" : "Choose a plan"}</button></div>`
+        <div class="meter ${acct.songs_used >= acct.song_limit ? "full" : ""}"><span style="width:${Math.min(100, ((acct.songs_used || 0) / (acct.song_limit || 1)) * 100).toFixed(1)}%"></span></div>
+        <p class="modal-hint">${songUsageText()}</p>
+        <div class="acct-actions">${acct.has_billing && (isSubscribed() || acct.subscription_status) ? `<button type="button" class="btn" data-billing="manage">Manage plan &amp; billing</button>` : ""}${hasComp() && !isSubscribed() ? "" : `<button type="button" class="btn ${isSubscribed() ? "" : "primary"}" data-billing="choose">${isSubscribed() ? "Compare plans" : "Choose a plan"}</button>`}</div>`
       : `<p class="modal-hint">${billingDown ? "Your plan details can't load right now." : "Loading your plan…"}</p>`}
       ${acct && acct.is_admin ? `<div class="acct-actions"><button type="button" class="btn" data-open-admin>Give free access…</button></div>` : ""}
     </div>
